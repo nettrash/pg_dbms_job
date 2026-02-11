@@ -322,8 +322,8 @@ mod tests {
     fn default_config_values() {
         let config = default_config();
         assert_eq!(config.pidfile, "/tmp/pg_dbms_job.pid");
-        assert_eq!(config.job_queue_processes, 1000);
-        assert_eq!(config.job_queue_interval, 5.0);
+        assert_eq!(config.job_queue_processes, 100000);
+        assert_eq!(config.job_queue_interval, 0.5);
     }
 
     #[test]

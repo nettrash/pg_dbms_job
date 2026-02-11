@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.75-bullseye AS build
+FROM rust:1.81-bullseye AS build
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock* ./

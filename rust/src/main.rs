@@ -298,8 +298,8 @@ fn default_config() -> Config {
         pidfile: "/tmp/pg_dbms_job.pid".to_string(),
         logfile: "".to_string(),
         log_truncate_on_rotation: false,
-        job_queue_interval: 5.0,
-        job_queue_processes: 1000,
+        job_queue_interval: 0.5,
+        job_queue_processes: 100000,
         nap_time: 0.1,
     }
 }

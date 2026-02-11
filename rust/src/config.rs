@@ -1,8 +1,13 @@
+//! Configuration file parsing and application.
+
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo};
 use crate::util::die;
 use std::fs;
 
+/// Read and apply configuration from a file path.
+///
+/// When `nodie` is true, missing files are logged instead of aborting.
 pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, nodie: bool) {
     let content = fs::read_to_string(config_file);
     if content.is_err() {
@@ -22,6 +27,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
     let content = content.unwrap();
     let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
+    // Load logfile first so subsequent logs go to the configured location.
     for line in &lines {
         if let Some((var, val)) = parse_config_line(line) {
             if var == "logfile" && config.logfile != val {
@@ -38,6 +44,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
         }
     }
 
+    // Apply remaining settings and database connection information.
     for line in &lines {
         if let Some((var, val)) = parse_config_line(line) {
             match var.as_str() {
@@ -127,6 +134,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
     }
 }
 
+/// Parse a single configuration line into `key=value` components.
 fn parse_config_line(line: &str) -> Option<(String, String)> {
     let mut l = line.replace('\r', "");
     if let Some(idx) = l.find('#') {

@@ -1,3 +1,5 @@
+//! Job discovery and execution logic.
+
 use crate::db::connect_job_db;
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo, Job, JobKind};
@@ -8,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::process;
 use std::time::Instant;
 
+/// Collect scheduled jobs that are ready to run.
 pub fn get_scheduled_jobs(
     client: &mut Client,
     config: &Config,
@@ -41,6 +44,7 @@ pub fn get_scheduled_jobs(
     jobs
 }
 
+/// Collect asynchronous jobs queued for execution.
 pub fn get_async_jobs(client: &mut Client, config: &Config) -> HashMap<i64, Job> {
     let mut jobs = HashMap::new();
     let query = "UPDATE dbms_job.all_async_jobs SET this_date = current_timestamp WHERE this_date IS NULL RETURNING job, what, log_user, schema_user";
@@ -81,6 +85,7 @@ pub fn get_async_jobs(client: &mut Client, config: &Config) -> HashMap<i64, Job>
     jobs
 }
 
+/// Remove a job from the async queue (or fallback to scheduled).
 pub fn delete_job(client: &mut Client, config: &Config, jobid: i64) {
     dprint(
         config,
@@ -102,6 +107,7 @@ pub fn delete_job(client: &mut Client, config: &Config, jobid: i64) {
     }
 }
 
+/// Spawn a child process to execute a job.
 pub fn spawn_job(
     kind: JobKind,
     job: Job,
@@ -114,6 +120,7 @@ pub fn spawn_job(
             running_pids.insert(child);
         }
         Ok(ForkResult::Child) => {
+            // Child executes the job then exits.
             match kind {
                 JobKind::Async => subprocess_async(job, dbinfo, config),
                 JobKind::Scheduled => subprocess_scheduled(job, dbinfo, config),
@@ -126,6 +133,7 @@ pub fn spawn_job(
     }
 }
 
+/// Execute an asynchronous job in a child process.
 fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     dprint(config, "LOG", &format!("executing job {}", job.job));
@@ -214,6 +222,7 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
     let _ = store_job_execution_details(&mut client, details);
 }
 
+/// Execute a scheduled job in a child process.
 fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     dprint(config, "LOG", &format!("executing job {}", job.job));
@@ -310,6 +319,7 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
     let _ = store_job_execution_details(&mut client, details);
 }
 
+/// Data captured for job execution history.
 struct JobExecutionDetails<'a> {
     owner: &'a str,
     jobid: i64,
@@ -320,6 +330,7 @@ struct JobExecutionDetails<'a> {
     sqlstate: &'a str,
 }
 
+/// Store job execution details in the database.
 fn store_job_execution_details(
     client: &mut Client,
     details: JobExecutionDetails<'_>,
@@ -341,6 +352,7 @@ fn store_job_execution_details(
     Ok(())
 }
 
+/// Build a DO block wrapper for the job body.
 fn build_do_block(jobid: i64, what: &str) -> String {
     format!(
         "DO $pg_dbms_job$\nDECLARE\n\tjob bigint := {jobid};\n\tnext_date timestamp with time zone := current_timestamp;\n\tbroken boolean := false;\nBEGIN\n\t{what}\nEND;\n$pg_dbms_job$;"

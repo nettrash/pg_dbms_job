@@ -1,3 +1,5 @@
+//! pg_dbms_job scheduler entry point.
+
 mod args;
 mod config;
 mod constants;
@@ -292,6 +294,7 @@ fn main() {
     dprint(&config, "LOG", "pg_dbms_job scheduler stopped.");
 }
 
+/// Default scheduler configuration values.
 fn default_config() -> Config {
     Config {
         debug: false,
@@ -304,6 +307,7 @@ fn default_config() -> Config {
     }
 }
 
+/// Default database connection settings.
 fn default_dbinfo() -> DbInfo {
     DbInfo {
         host: "".to_string(),

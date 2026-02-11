@@ -1,3 +1,6 @@
+//! Small utilities used across the scheduler.
+
+/// Print a fatal message and terminate the process.
 pub fn die(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);

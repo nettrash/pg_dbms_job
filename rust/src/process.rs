@@ -1,3 +1,5 @@
+//! Process management helpers for daemonization and signals.
+
 use crate::constants::PROGRAM;
 use crate::logging::dprint;
 use crate::model::Config;
@@ -12,6 +14,7 @@ use std::process::{self, Command};
 use std::thread;
 use std::time::Duration;
 
+/// Fork and detach the scheduler from the controlling terminal.
 pub fn daemonize(config: &Config) {
     match unsafe { fork() } {
         Ok(ForkResult::Parent { .. }) => process::exit(0),
@@ -38,6 +41,7 @@ pub fn daemonize(config: &Config) {
         .and_then(|f| nix::unistd::dup2(f.as_raw_fd(), 1).map_err(io::Error::other));
 }
 
+/// Write the current process id to a pid file.
 pub fn write_pidfile(path: &str) {
     let mut file = File::create(path).unwrap_or_else(|err| {
         die(&format!("FATAL: can't create pid file {}, {}", path, err));
@@ -45,6 +49,7 @@ pub fn write_pidfile(path: &str) {
     let _ = writeln!(file, "{}", process::id());
 }
 
+/// Send a signal to the running daemon using the pid file.
 pub fn signal_handling(pidfile: &str, sig: Signal) {
     let pid = read_pid_from_file(pidfile).or_else(read_pid_from_ps);
     let pid = match pid {
@@ -62,12 +67,14 @@ pub fn signal_handling(pidfile: &str, sig: Signal) {
     process::exit(0);
 }
 
+/// Read a pid from a file path.
 fn read_pid_from_file(path: &str) -> Option<i32> {
     let mut buf = String::new();
     File::open(path).ok()?.read_to_string(&mut buf).ok()?;
     buf.trim().parse::<i32>().ok()
 }
 
+/// Fallback to `ps` when a pid file is missing.
 fn read_pid_from_ps() -> Option<i32> {
     let output = Command::new("ps")
         .args(["h", "-opid", "-Cpg_dbms_job"])
@@ -77,6 +84,7 @@ fn read_pid_from_ps() -> Option<i32> {
     pid_str.split_whitespace().next()?.parse::<i32>().ok()
 }
 
+/// Reap exited child processes and update the pid set.
 pub fn reap_children(running: &mut std::collections::HashSet<Pid>) {
     loop {
         match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
@@ -93,6 +101,7 @@ pub fn reap_children(running: &mut std::collections::HashSet<Pid>) {
     }
 }
 
+/// Wait until all tracked child processes have exited.
 pub fn wait_all_children(running: &mut std::collections::HashSet<Pid>) {
     while !running.is_empty() {
         reap_children(running);

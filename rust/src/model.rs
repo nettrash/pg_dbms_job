@@ -1,34 +1,58 @@
+//! Data models shared across the scheduler.
+
 #[derive(Clone)]
+/// Runtime configuration values for the scheduler.
 pub struct Config {
+    /// Whether debug logging is enabled.
     pub debug: bool,
+    /// Path to the daemon pid file.
     pub pidfile: String,
+    /// Path template for the log file.
     pub logfile: String,
+    /// Whether to truncate log file on rotation.
     pub log_truncate_on_rotation: bool,
+    /// Interval (seconds) for queue polling.
     pub job_queue_interval: f64,
+    /// Max number of concurrent jobs.
     pub job_queue_processes: usize,
+    /// Sleep time between loops (seconds).
     pub nap_time: f64,
 }
 
 #[derive(Clone)]
+/// Database connection settings.
 pub struct DbInfo {
+    /// Database host.
     pub host: String,
+    /// Database name.
     pub database: String,
+    /// Database user.
     pub user: String,
+    /// Database password.
     pub passwd: String,
+    /// Database port.
     pub port: u16,
 }
 
 #[derive(Clone)]
+/// A job definition fetched from the scheduler tables.
 pub struct Job {
+    /// Job identifier.
     pub job: i64,
+    /// SQL or PL/pgSQL block to execute.
     pub what: String,
+    /// Optional log owner for the job.
     pub log_user: Option<String>,
+    /// Optional schema owner for the job.
     pub schema_user: Option<String>,
 }
 
 #[derive(Copy, Clone)]
+/// Kind of job for execution and logging.
 pub enum JobKind {
+    /// Async jobs are triggered via notification or queue polling.
     Async,
+    /// Scheduled jobs run at computed intervals.
     Scheduled,
 }
 

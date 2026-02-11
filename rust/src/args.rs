@@ -1,29 +1,43 @@
+//! Command-line argument parsing for pg_dbms_job.
+
 use crate::constants::PROGRAM;
 use std::env;
 
 #[derive(Default)]
+/// Parsed command-line arguments for the scheduler.
 pub struct Args {
+    /// Path to the configuration file.
     pub config_file: String,
+    /// Optional debug override from CLI flags.
     pub debug_override: Option<bool>,
+    /// Show usage and exit.
     pub help: bool,
+    /// Send SIGTERM to the daemon.
     pub kill: bool,
+    /// Send SIGINT to the daemon (immediate stop).
     pub abort: bool,
+    /// Send SIGHUP to reload configuration.
     pub reload: bool,
+    /// Run a single loop without daemonizing.
     pub single: bool,
+    /// Show version and exit.
     pub version: bool,
 }
 
+/// Print usage text for the binary.
 pub fn usage(config_file: &str) {
     println!(
         "usage: {PROGRAM} [options]\n\noptions:\n\n  -c, --config  file  configuration file. Default: {config_file}\n  -d, --debug         run in debug mode.\n  -k, --kill          stop current running daemon gracefully waiting\n                      for all job completion.\n  -m, --immediate     stop running daemon and jobs immediatly.\n  -r, --reload        reload configuration file and jobs definition.\n  -s, --single        do not detach and run in single loop mode and exit.\n"
     );
 }
 
+/// Parse CLI arguments from the current process.
 pub fn parse_args() -> Args {
     let argv: Vec<String> = env::args().skip(1).collect();
     parse_args_from(&argv)
 }
 
+/// Parse CLI arguments from a provided argv slice.
 fn parse_args_from(argv: &[String]) -> Args {
     let mut args = Args::default();
     let mut iter = argv.iter();

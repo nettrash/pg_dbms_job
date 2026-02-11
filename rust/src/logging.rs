@@ -1,3 +1,5 @@
+//! Logging utilities.
+
 use crate::model::Config;
 use chrono::Local;
 use std::fs::{self, OpenOptions};
@@ -6,6 +8,7 @@ use std::path::Path;
 use std::process;
 use std::sync::{Mutex, OnceLock};
 
+/// Write a log line based on config and severity level.
 pub fn dprint(config: &Config, level: &str, msg: &str) {
     if level.eq_ignore_ascii_case("DEBUG") && !config.debug {
         return;
@@ -17,6 +20,7 @@ pub fn dprint(config: &Config, level: &str, msg: &str) {
     }
 
     if config.log_truncate_on_rotation {
+        // Track previous log file name to support truncate-on-rotation.
         static OLD_LOG_FILE: OnceLock<Mutex<String>> = OnceLock::new();
         let old = OLD_LOG_FILE.get_or_init(|| Mutex::new(String::new()));
         if let Ok(mut old_name) = old.lock() {

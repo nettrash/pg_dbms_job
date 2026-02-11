@@ -1,8 +1,13 @@
+//! Database connection helpers.
+
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo};
 use crate::util::die;
 use postgres::{Client, NoTls};
 
+/// Connect to the scheduler database and set up notifications.
+///
+/// Returns an error if another scheduler instance is already running.
 pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, String> {
     let conn_str = build_conn_str(dbinfo);
     let mut client = Client::connect(&conn_str, NoTls).map_err(|e| e.to_string())?;
@@ -40,6 +45,7 @@ pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, String> {
     Ok(client)
 }
 
+/// Connect to the database for a specific job execution.
 pub fn connect_job_db(dbinfo: &DbInfo, application_name: &str) -> Result<Client, postgres::Error> {
     let conn_str = build_conn_str(dbinfo);
     let mut client = Client::connect(&conn_str, NoTls)?;
@@ -47,6 +53,7 @@ pub fn connect_job_db(dbinfo: &DbInfo, application_name: &str) -> Result<Client,
     Ok(client)
 }
 
+/// Build a libpq-style connection string from settings.
 fn build_conn_str(dbinfo: &DbInfo) -> String {
     format!(
         "host={} port={} user={} password={} dbname={}",

@@ -43,8 +43,8 @@ jobs:
   docker:
     needs: build
     runs-on: ubuntu-latest
-    # Only run automatically on master branch, or when manually triggered
-    if: github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    # Only run automatically on main branch, or when manually triggered
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     
     steps:
     - uses: actions/checkout@v4
@@ -89,8 +89,8 @@ jobs:
         docker run --rm nettrash/pg_dbms_job:test pg_dbms_job --help
     
     - name: Build and push Docker image (multi-platform)
-      # Push to registry if: not a PR AND (on master branch OR manually triggered)
-      if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch')
+      # Push to registry if: not a PR AND (on main branch OR manually triggered)
+      if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
       uses: docker/build-push-action@v5
       with:
         context: .

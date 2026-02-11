@@ -13,6 +13,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
 
     steps:
     - uses: actions/checkout@v4
@@ -20,25 +23,16 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: 1.88.0
         components: rustfmt, clippy
-    
+
     - name: Check format
-      run: 
-        cd ${{ github.workspace }}/rust ;
-          cargo fmt -- --check
+      run: cargo fmt -- --check
     - name: Check clippy
-      run: 
-        cd ${{ github.workspace }}/rust ;
-          cargo clippy --all-targets --all-features
+      run: cargo clippy --all-targets --all-features
     - name: Build
-      run: 
-        cd ${{ github.workspace }}/rust ;
-        cargo build --verbose
+      run: cargo build --verbose
     - name: Run tests
-      run: 
-        cd ${{ github.workspace }}/rust ;
-        cargo test --verbose
+      run: cargo test --verbose
 
   docker:
     needs: build
@@ -74,7 +68,7 @@ jobs:
     - name: Build Docker image for testing (single platform)
       uses: docker/build-push-action@v5
       with:
-        context: .
+        context: ./rust
         platforms: linux/amd64
         push: false
         tags: nettrash/pg_dbms_job:test
@@ -86,14 +80,14 @@ jobs:
     - name: Test Docker image locally
       run: |
         echo "Testing image: nettrash/pg_dbms_job:test"
-        docker run --rm nettrash/pg_dbms_job:test pg_dbms_job --help
+        docker run --rm nettrash/pg_dbms_job:test --help
     
     - name: Build and push Docker image (multi-platform)
       # Push to registry if: not a PR AND (on main branch OR manually triggered)
       if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
       uses: docker/build-push-action@v5
       with:
-        context: .
+        context: ./rust
         platforms: linux/amd64,linux/arm64
         push: true
         tags: ${{ steps.meta.outputs.tags }}

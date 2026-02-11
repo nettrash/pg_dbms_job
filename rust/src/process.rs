@@ -31,17 +31,11 @@ pub fn daemonize(config: &Config) {
     let _ = OpenOptions::new()
         .read(true)
         .open("/dev/null")
-        .and_then(|f| {
-            nix::unistd::dup2(f.as_raw_fd(), 0)
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
-        });
+        .and_then(|f| nix::unistd::dup2(f.as_raw_fd(), 0).map_err(io::Error::other));
     let _ = OpenOptions::new()
         .write(true)
         .open("/dev/null")
-        .and_then(|f| {
-            nix::unistd::dup2(f.as_raw_fd(), 1)
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
-        });
+        .and_then(|f| nix::unistd::dup2(f.as_raw_fd(), 1).map_err(io::Error::other));
 }
 
 pub fn write_pidfile(path: &str) {

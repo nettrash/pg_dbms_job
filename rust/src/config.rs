@@ -162,7 +162,10 @@ mod tests {
     fn parse_config_line_ignores_comments() {
         assert_eq!(parse_config_line("# just a comment"), None);
         let parsed = parse_config_line("logfile=/tmp/test.log # rotate");
-        assert_eq!(parsed, Some(("logfile".to_string(), "/tmp/test.log".to_string())));
+        assert_eq!(
+            parsed,
+            Some(("logfile".to_string(), "/tmp/test.log".to_string()))
+        );
     }
 
     #[test]

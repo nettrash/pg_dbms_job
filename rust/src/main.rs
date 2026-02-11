@@ -137,7 +137,7 @@ fn main() {
             match connect_db(&dbinfo, &config) {
                 Ok(client) => dbh = Some(client),
                 Err(err) => {
-                    dprint(&config, "ERROR", &format!("{err}"));
+                    dprint(&config, "ERROR", &err.to_string());
                     thread::sleep(Duration::from_secs(3));
                     startup = true;
                     config_invalidated = true;

@@ -169,7 +169,6 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
         }
     }
 
-    let mut success = true;
     let mut status_text = String::new();
     let mut err_text = String::new();
     let mut sqlstate = String::new();
@@ -177,7 +176,6 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
     let t0 = Instant::now();
     let code = build_do_block(job.job, &job.what);
     if let Err(err) = client.batch_execute(&code) {
-        success = false;
         err_text = err.to_string();
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
         status_text = "ERROR".to_string();
@@ -204,17 +202,16 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
     delete_job(&mut client, config, job.job);
 
     let duration_secs = t0.elapsed().as_secs() as i64;
-    let _ = store_job_execution_details(
-        &mut client,
-        job.log_user.as_deref().unwrap_or(""),
-        job.job,
-        &start_t,
+    let details = JobExecutionDetails {
+        owner: job.log_user.as_deref().unwrap_or(""),
+        jobid: job.job,
+        start_date: &start_t,
         duration_secs,
-        &status_text,
-        &err_text,
-        &sqlstate,
-        success,
-    );
+        status_text: &status_text,
+        err_text: &err_text,
+        sqlstate: &sqlstate,
+    };
+    let _ = store_job_execution_details(&mut client, details);
 }
 
 fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
@@ -260,7 +257,6 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
         }
     }
 
-    let mut success = true;
     let mut status_text = String::new();
     let mut err_text = String::new();
     let mut sqlstate = String::new();
@@ -268,7 +264,6 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
     let t0 = Instant::now();
     let code = build_do_block(job.job, &job.what);
     if let Err(err) = client.batch_execute(&code) {
-        success = false;
         err_text = err.to_string();
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
         status_text = "ERROR".to_string();
@@ -303,42 +298,44 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
         &[&duration_secs.to_string(), &job.job],
     );
 
-    let _ = store_job_execution_details(
-        &mut client,
-        job.log_user.as_deref().unwrap_or(""),
-        job.job,
-        &start_t,
+    let details = JobExecutionDetails {
+        owner: job.log_user.as_deref().unwrap_or(""),
+        jobid: job.job,
+        start_date: &start_t,
         duration_secs,
-        &status_text,
-        &err_text,
-        &sqlstate,
-        success,
-    );
+        status_text: &status_text,
+        err_text: &err_text,
+        sqlstate: &sqlstate,
+    };
+    let _ = store_job_execution_details(&mut client, details);
+}
+
+struct JobExecutionDetails<'a> {
+    owner: &'a str,
+    jobid: i64,
+    start_date: &'a str,
+    duration_secs: i64,
+    status_text: &'a str,
+    err_text: &'a str,
+    sqlstate: &'a str,
 }
 
 fn store_job_execution_details(
     client: &mut Client,
-    owner: &str,
-    jobid: i64,
-    start_date: &str,
-    duration_secs: i64,
-    status_text: &str,
-    err_text: &str,
-    sqlstate: &str,
-    _success: bool,
+    details: JobExecutionDetails<'_>,
 ) -> Result<(), postgres::Error> {
     let query = "INSERT INTO dbms_job.all_scheduler_job_run_details (owner, job_name, status, error, req_start_date, actual_start_date, run_duration, slave_pid, additional_info) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8)";
     client.execute(
         query,
         &[
-            &owner,
-            &jobid.to_string(),
-            &status_text,
-            &sqlstate,
-            &start_date,
-            &duration_secs,
+            &details.owner,
+            &details.jobid.to_string(),
+            &details.status_text,
+            &details.sqlstate,
+            &details.start_date,
+            &details.duration_secs,
             &(process::id() as i32),
-            &err_text,
+            &details.err_text,
         ],
     )?;
     Ok(())

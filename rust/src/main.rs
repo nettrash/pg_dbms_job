@@ -27,8 +27,8 @@ use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -281,14 +281,14 @@ fn main() {
     }
 
     wait_all_children(&mut running_pids);
-    if Path::new(&config.pidfile).exists() {
-        if let Err(err) = std::fs::remove_file(&config.pidfile) {
-            dprint(
-                &config,
-                "ERROR",
-                &format!("Unable to remove pid file {}, {}", config.pidfile, err),
-            );
-        }
+    if Path::new(&config.pidfile).exists()
+        && let Err(err) = std::fs::remove_file(&config.pidfile)
+    {
+        dprint(
+            &config,
+            "ERROR",
+            &format!("Unable to remove pid file {}, {}", config.pidfile, err),
+        );
     }
 
     dprint(&config, "LOG", "pg_dbms_job scheduler stopped.");

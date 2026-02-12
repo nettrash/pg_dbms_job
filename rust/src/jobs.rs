@@ -286,15 +286,15 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
         }
     };
 
-    if let Some(log_user) = &job.log_user {
-        if let Err(err) = client.batch_execute(&format!("SET ROLE {log_user}")) {
-            dprint(
-                config,
-                "ERROR",
-                &format!("can not change role, reason: {err}"),
-            );
-            return;
-        }
+    if let Some(log_user) = &job.log_user
+        && let Err(err) = client.batch_execute(&format!("SET ROLE {log_user}"))
+    {
+        dprint(
+            config,
+            "ERROR",
+            &format!("can not change role, reason: {err}"),
+        );
+        return;
     }
 
     if let Err(err) = client.batch_execute("BEGIN") {
@@ -306,15 +306,15 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
         return;
     }
 
-    if let Some(schema_user) = &job.schema_user {
-        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
-            dprint(
-                config,
-                "ERROR",
-                &format!("can not change the search_path, reason: {err}"),
-            );
-            return;
-        }
+    if let Some(schema_user) = &job.schema_user
+        && let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}"))
+    {
+        dprint(
+            config,
+            "ERROR",
+            &format!("can not change the search_path, reason: {err}"),
+        );
+        return;
     }
 
     let mut status_text = String::new();

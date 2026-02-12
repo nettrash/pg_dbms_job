@@ -29,18 +29,19 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
 
     // Load logfile first so subsequent logs go to the configured location.
     for line in &lines {
-        if let Some((var, val)) = parse_config_line(line) {
-            if var == "logfile" && config.logfile != val {
-                config.logfile = val;
-                dprint(
-                    config,
-                    "LOG",
-                    &format!(
-                        "Setting logfile from configuration file to {}",
-                        config.logfile
-                    ),
-                );
-            }
+        if let Some((var, val)) = parse_config_line(line)
+            && var == "logfile"
+            && config.logfile != val
+        {
+            config.logfile = val;
+            dprint(
+                config,
+                "LOG",
+                &format!(
+                    "Setting logfile from configuration file to {}",
+                    config.logfile
+                ),
+            );
         }
     }
 
@@ -89,18 +90,18 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     }
                 }
                 "job_queue_processes" => {
-                    if let Ok(v) = val.parse::<usize>() {
-                        if config.job_queue_processes != v {
-                            config.job_queue_processes = v;
-                            dprint(
-                                config,
-                                "LOG",
-                                &format!(
-                                    "Setting job_queue_processes from configuration file to {}",
-                                    config.job_queue_processes
-                                ),
-                            );
-                        }
+                    if let Ok(v) = val.parse::<usize>()
+                        && config.job_queue_processes != v
+                    {
+                        config.job_queue_processes = v;
+                        dprint(
+                            config,
+                            "LOG",
+                            &format!(
+                                "Setting job_queue_processes from configuration file to {}",
+                                config.job_queue_processes
+                            ),
+                        );
                     }
                 }
                 "nap_time" => {

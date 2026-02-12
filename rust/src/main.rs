@@ -281,14 +281,14 @@ fn main() {
     }
 
     wait_all_children(&mut running_pids);
-    if Path::new(&config.pidfile).exists() {
-        if let Err(err) = std::fs::remove_file(&config.pidfile) {
-            dprint(
-                &config,
-                "ERROR",
-                &format!("Unable to remove pid file {}, {}", config.pidfile, err),
-            );
-        }
+    if Path::new(&config.pidfile).exists()
+        && let Err(err) = std::fs::remove_file(&config.pidfile)
+    {
+        dprint(
+            &config,
+            "ERROR",
+            &format!("Unable to remove pid file {}, {}", config.pidfile, err),
+        );
     }
 
     dprint(&config, "LOG", "pg_dbms_job scheduler stopped.");

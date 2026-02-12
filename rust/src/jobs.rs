@@ -4,6 +4,7 @@ use crate::db::connect_job_db;
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo, Job, JobKind};
 use chrono::Local;
+use nix::libc;
 use nix::unistd::{ForkResult, Pid, fork};
 use postgres::Client;
 use std::collections::{HashMap, HashSet};
@@ -120,12 +121,14 @@ pub fn spawn_job(
             running_pids.insert(child);
         }
         Ok(ForkResult::Child) => {
-            // Child executes the job then exits.
-            match kind {
+            // Prevent unwind across forked child path.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
                 JobKind::Async => subprocess_async(job, dbinfo, config),
                 JobKind::Scheduled => subprocess_scheduled(job, dbinfo, config),
-            }
-            process::exit(0);
+            }));
+
+            // In forked child, prefer _exit over process::exit.
+            unsafe { libc::_exit(0) };
         }
         Err(err) => {
             dprint(config, "ERROR", &format!("cannot fork: {err}"));
@@ -278,13 +281,32 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
         &format!("executing scheduled job {}", job.job),
     );
 
-    let mut client = match connect_job_db(dbinfo, &format!("pg_dbms_job:scheduled:{}", job.job)) {
-        Ok(c) => c,
-        Err(err) => {
+    dprint(
+        config,
+        "DEBUG",
+        &format!("connecting to database for job {}", job.job),
+    );
+
+    let app_name = format!("pg_dbms_job:scheduled:{}", job.job);
+    let mut client = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        connect_job_db(dbinfo, &app_name)
+    })) {
+        Ok(Ok(c)) => c,
+        Ok(Err(err)) => {
             dprint(config, "ERROR", &format!("{err}"));
             return;
         }
+        Err(_) => {
+            dprint(config, "ERROR", "connect_job_db panicked");
+            return;
+        }
     };
+
+    dprint(
+        config,
+        "DEBUG",
+        &format!("connected to database for job {}", job.job),
+    );
 
     if let Some(log_user) = &job.log_user
         && let Err(err) = client.batch_execute(&format!("SET ROLE {log_user}"))
@@ -295,6 +317,8 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
             &format!("can not change role, reason: {err}"),
         );
         return;
+    } else {
+        dprint(config, "DEBUG", "log_user is not set, using default role");
     }
 
     if let Err(err) = client.batch_execute("BEGIN") {
@@ -315,6 +339,12 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
             &format!("can not change the search_path, reason: {err}"),
         );
         return;
+    } else {
+        dprint(
+            config,
+            "DEBUG",
+            "schema_user is not set, using default search_path",
+        );
     }
 
     let mut status_text = String::new();
@@ -323,6 +353,8 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
 
     let t0 = Instant::now();
     let code = build_do_block(job.job, &job.what);
+    dprint(config, "DEBUG", "code to execute:");
+    dprint(config, "DEBUG", &code);
     if let Err(err) = client.batch_execute(&code) {
         err_text = err.to_string();
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
@@ -332,6 +364,7 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
             "ERROR",
             &format!("job {} failure, reason: {}", job.job, err_text),
         );
+        dprint(config, "DEBUG", "ROLLBACK");
         if let Err(err) = client.batch_execute("ROLLBACK") {
             dprint(
                 config,
@@ -344,12 +377,15 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
                 &[&job.job],
             );
         }
-    } else if let Err(err) = client.batch_execute("COMMIT") {
-        dprint(
-            config,
-            "ERROR",
-            &format!("can not commit a transaction, reason: {err}"),
-        );
+    } else {
+        dprint(config, "DEBUG", "COMMIT");
+        if let Err(err) = client.batch_execute("COMMIT") {
+            dprint(
+                config,
+                "ERROR",
+                &format!("can not commit a transaction, reason: {err}"),
+            );
+        }
     }
 
     let duration_secs = t0.elapsed().as_secs() as i64;
@@ -367,6 +403,11 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
         err_text: &err_text,
         sqlstate: &sqlstate,
     };
+    dprint(
+        config,
+        "DEBUG",
+        &format!("storing job execution details: {:?}", details),
+    );
     let _ = store_job_execution_details(&mut client, details);
 }
 

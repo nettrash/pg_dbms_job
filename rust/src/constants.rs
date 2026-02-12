@@ -1,7 +1,7 @@
 //! Build-time constants for pg_dbms_job.
 
 /// Current scheduler version string.
-pub const VERSION: &str = "1.5";
+pub const VERSION: &str = "1.5.1-rust";
 /// Program name used in usage text and messaging.
 pub const PROGRAM: &str = "pg_dbms_job";
 
@@ -12,6 +12,6 @@ mod tests {
     #[test]
     fn constants_are_expected() {
         assert_eq!(PROGRAM, "pg_dbms_job");
-        assert_eq!(VERSION, "1.5");
+        assert_eq!(VERSION, "1.5.1-rust");
     }
 }

@@ -4,7 +4,7 @@ use crate::db::connect_job_db;
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo, Job, JobKind};
 use chrono::Local;
-use nix::unistd::{fork, ForkResult, Pid};
+use nix::unistd::{ForkResult, Pid, fork};
 use postgres::Client;
 use std::collections::{HashMap, HashSet};
 use std::process;
@@ -136,17 +136,37 @@ pub fn spawn_job(
 /// Execute an asynchronous job in a child process.
 fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    dprint(config, "LOG", &format!("executing job {}", job.job));
+    dprint(config, "LOG", &format!("executing async job {}", job.job));
 
-    let mut client = match connect_job_db(dbinfo, &format!("pg_dbms_job:async:{}", job.job)) {
-        Ok(c) => c,
-        Err(err) => {
+    dprint(
+        config,
+        "DEBUG",
+        &format!("connecting to database for job {}", job.job),
+    );
+
+    let app_name = format!("pg_dbms_job:async:{}", job.job);
+    let mut client = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        connect_job_db(dbinfo, &app_name)
+    })) {
+        Ok(Ok(c)) => c,
+        Ok(Err(err)) => {
             dprint(config, "ERROR", &format!("{err}"));
+            return;
+        }
+        Err(_) => {
+            dprint(config, "ERROR", "connect_job_db panicked");
             return;
         }
     };
 
+    dprint(
+        config,
+        "DEBUG",
+        &format!("connected to database for job {}", job.job),
+    );
+
     if let Some(log_user) = &job.log_user {
+        dprint(config, "DEBUG", &format!("SET ROLE {log_user}"));
         if let Err(err) = client.batch_execute(&format!("SET ROLE {log_user}")) {
             dprint(
                 config,
@@ -155,8 +175,11 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
             );
             return;
         }
+    } else {
+        dprint(config, "DEBUG", "log_user is not set, using default role");
     }
 
+    dprint(config, "DEBUG", "BEGIN");
     if let Err(err) = client.batch_execute("BEGIN") {
         dprint(
             config,
@@ -167,6 +190,11 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
     }
 
     if let Some(schema_user) = &job.schema_user {
+        dprint(
+            config,
+            "DEBUG",
+            &format!("SET LOCAL search_path TO {schema_user}"),
+        );
         if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
             dprint(
                 config,
@@ -175,6 +203,12 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
             );
             return;
         }
+    } else {
+        dprint(
+            config,
+            "DEBUG",
+            "schema_user is not set, using default search_path",
+        );
     }
 
     let mut status_text = String::new();
@@ -183,6 +217,8 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
 
     let t0 = Instant::now();
     let code = build_do_block(job.job, &job.what);
+    dprint(config, "DEBUG", "code to execute:");
+    dprint(config, "DEBUG", &code);
     if let Err(err) = client.batch_execute(&code) {
         err_text = err.to_string();
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
@@ -192,6 +228,7 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
             "ERROR",
             &format!("job {} failure, reason: {}", job.job, err_text),
         );
+        dprint(config, "DEBUG", "ROLLBACK");
         if let Err(err) = client.batch_execute("ROLLBACK") {
             dprint(
                 config,
@@ -199,14 +236,19 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
                 &format!("can not rollback a transaction, reason: {err}"),
             );
         }
-    } else if let Err(err) = client.batch_execute("COMMIT") {
-        dprint(
-            config,
-            "ERROR",
-            &format!("can not commit a transaction, reason: {err}"),
-        );
+    } else {
+        dprint(config, "DEBUG", "COMMIT");
+
+        if let Err(err) = client.batch_execute("COMMIT") {
+            dprint(
+                config,
+                "ERROR",
+                &format!("can not commit a transaction, reason: {err}"),
+            );
+        }
     }
 
+    dprint(config, "DEBUG", "delete job");
     delete_job(&mut client, config, job.job);
 
     let duration_secs = t0.elapsed().as_secs() as i64;
@@ -219,13 +261,22 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
         err_text: &err_text,
         sqlstate: &sqlstate,
     };
+    dprint(
+        config,
+        "DEBUG",
+        &format!("storing job execution details: {:?}", details),
+    );
     let _ = store_job_execution_details(&mut client, details);
 }
 
 /// Execute a scheduled job in a child process.
 fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    dprint(config, "LOG", &format!("executing job {}", job.job));
+    dprint(
+        config,
+        "LOG",
+        &format!("executing scheduled job {}", job.job),
+    );
 
     let mut client = match connect_job_db(dbinfo, &format!("pg_dbms_job:scheduled:{}", job.job)) {
         Ok(c) => c,
@@ -320,6 +371,7 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
 }
 
 /// Data captured for job execution history.
+#[derive(Debug)]
 struct JobExecutionDetails<'a> {
     owner: &'a str,
     jobid: i64,
@@ -335,20 +387,54 @@ fn store_job_execution_details(
     client: &mut Client,
     details: JobExecutionDetails<'_>,
 ) -> Result<(), postgres::Error> {
-    let query = "INSERT INTO dbms_job.all_scheduler_job_run_details (owner, job_name, status, error, req_start_date, actual_start_date, run_duration, slave_pid, additional_info) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8)";
-    client.execute(
+    let query = r#"
+    INSERT INTO dbms_job.all_scheduler_job_run_details
+        (owner, job_name, status, error, req_start_date, actual_start_date, run_duration, slave_pid, additional_info)
+    VALUES
+        ($1, $2, $3, $4::bigint, NULL,
+         to_timestamp($5, 'YYYY-MM-DD HH24:MI:SS'),
+         $6,
+         $7, $8)
+    "#;
+
+    let error_code: Option<i64> = details.sqlstate.parse::<i64>().ok();
+    let additional_info = if details.sqlstate.is_empty() {
+        details.err_text.to_string()
+    } else if details.err_text.is_empty() {
+        format!("sqlstate={}", details.sqlstate)
+    } else {
+        format!("sqlstate={}, {}", details.sqlstate, details.err_text)
+    };
+
+    match client.execute(
         query,
         &[
             &details.owner,
             &details.jobid.to_string(),
             &details.status_text,
-            &details.sqlstate,
+            &error_code, // parameter 3 / $4
             &details.start_date,
-            &details.duration_secs,
+            &details.duration_secs, // bigint
             &(process::id() as i32),
-            &details.err_text,
+            &additional_info,
         ],
-    )?;
+    ) {
+        Ok(_) => (),
+        Err(err) => {
+            if let Some(db) = err.as_db_error() {
+                eprintln!(
+                    "failed to store job execution details: code={} message={} detail={:?} hint={:?}",
+                    db.code().code(),
+                    db.message(),
+                    db.detail(),
+                    db.hint()
+                );
+            } else {
+                eprintln!("failed to store job execution details: {err}");
+            }
+        }
+    };
+
     Ok(())
 }
 

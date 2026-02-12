@@ -4,11 +4,10 @@ use crate::db::connect_job_db;
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo, Job, JobKind};
 use chrono::Local;
-use nix::libc;
-use nix::unistd::{ForkResult, Pid, fork};
 use postgres::Client;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::process;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 /// Collect scheduled jobs that are ready to run.
@@ -108,32 +107,30 @@ pub fn delete_job(client: &mut Client, config: &Config, jobid: i64) {
     }
 }
 
-/// Spawn a child process to execute a job.
+/// Spawn a worker thread to execute a job.
 pub fn spawn_job(
     kind: JobKind,
     job: Job,
     dbinfo: &DbInfo,
     config: &Config,
-    running_pids: &mut HashSet<Pid>,
+    running_workers: &mut HashMap<u64, JoinHandle<()>>,
+    next_worker_id: &mut u64,
 ) {
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child }) => {
-            running_pids.insert(child);
-        }
-        Ok(ForkResult::Child) => {
-            // Prevent unwind across forked child path.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
-                JobKind::Async => subprocess_async(job, dbinfo, config),
-                JobKind::Scheduled => subprocess_scheduled(job, dbinfo, config),
-            }));
+    let worker_id = *next_worker_id;
+    *next_worker_id = next_worker_id.wrapping_add(1);
 
-            // In forked child, prefer _exit over process::exit.
-            unsafe { libc::_exit(0) };
-        }
-        Err(err) => {
-            dprint(config, "ERROR", &format!("cannot fork: {err}"));
-        }
-    }
+    let job_clone = job.clone();
+    let dbinfo_clone = dbinfo.clone();
+    let config_clone = config.clone();
+
+    let handle = std::thread::spawn(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
+            JobKind::Async => subprocess_async(job_clone, &dbinfo_clone, &config_clone),
+            JobKind::Scheduled => subprocess_scheduled(job_clone, &dbinfo_clone, &config_clone),
+        }));
+    });
+
+    running_workers.insert(worker_id, handle);
 }
 
 /// Execute an asynchronous job in a child process.

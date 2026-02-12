@@ -5,13 +5,14 @@ use crate::logging::dprint;
 use crate::model::Config;
 use crate::util::die;
 use nix::sys::signal::{Signal, kill};
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{ForkResult, Pid, fork, setsid};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::process::{self, Command};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Fork and detach the scheduler from the controlling terminal.
@@ -84,25 +85,22 @@ fn read_pid_from_ps() -> Option<i32> {
     pid_str.split_whitespace().next()?.parse::<i32>().ok()
 }
 
-/// Reap exited child processes and update the pid set.
-pub fn reap_children(running: &mut std::collections::HashSet<Pid>) {
-    loop {
-        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::Exited(pid, _)) => {
-                running.remove(&pid);
-            }
-            Ok(WaitStatus::Signaled(pid, _, _)) => {
-                running.remove(&pid);
-            }
-            Ok(WaitStatus::StillAlive) => break,
-            Err(_) => break,
-            _ => {}
+/// Reap completed worker threads and remove them from the active set.
+pub fn reap_children(running: &mut HashMap<u64, JoinHandle<()>>) {
+    let finished_ids: Vec<u64> = running
+        .iter()
+        .filter_map(|(id, handle)| handle.is_finished().then_some(*id))
+        .collect();
+
+    for id in finished_ids {
+        if let Some(handle) = running.remove(&id) {
+            let _ = handle.join();
         }
     }
 }
 
-/// Wait until all tracked child processes have exited.
-pub fn wait_all_children(running: &mut std::collections::HashSet<Pid>) {
+/// Wait until all tracked worker threads have exited.
+pub fn wait_all_children(running: &mut HashMap<u64, JoinHandle<()>>) {
     while !running.is_empty() {
         reap_children(running);
         thread::sleep(Duration::from_secs(1));

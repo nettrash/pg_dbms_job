@@ -21,21 +21,23 @@ use crate::process::{daemonize, reap_children, signal_handling, wait_all_childre
 use crate::util::die;
 use fallible_iterator::FallibleIterator;
 use nix::sys::signal::Signal;
-use nix::unistd::Pid;
 use postgres::Client;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 fn main() {
     let mut args = parse_args();
     if args.config_file.is_empty() {
-        args.config_file = "/etc/pg_dbms_job/pg_dbms_job.conf".to_string();
+        //args.config_file = "/etc/pg_dbms_job/pg_dbms_job.conf".to_string();
+        args.config_file =
+            "/Users/nettrash/Develop/github/pg_dbms_job/data/pg_dbms_job.conf".to_string();
     }
 
     if args.help {
@@ -91,7 +93,8 @@ fn main() {
     dprint(&config, "LOG", "Entering main loop.");
 
     let mut dbh: Option<Client> = None;
-    let mut running_pids: HashSet<Pid> = HashSet::new();
+    let mut running_workers: HashMap<u64, JoinHandle<()>> = HashMap::new();
+    let mut next_worker_id: u64 = 1;
     let mut scheduled_jobs: HashMap<i64, Job> = HashMap::new();
     let mut async_jobs: HashMap<i64, Job> = HashMap::new();
     let mut previous_async_exec = Instant::now();
@@ -100,7 +103,7 @@ fn main() {
     let mut config_invalidated = false;
 
     while !terminate_flag.load(Ordering::Relaxed) {
-        reap_children(&mut running_pids);
+        reap_children(&mut running_workers);
 
         if reload_flag.swap(false, Ordering::Relaxed) {
             dprint(&config, "LOG", "Received reload signal HUP.");
@@ -235,7 +238,7 @@ fn main() {
 
         let scheduled_keys: Vec<i64> = scheduled_jobs.keys().copied().collect();
         for jobid in scheduled_keys {
-            while running_pids.len() >= config.job_queue_processes {
+            while running_workers.len() >= config.job_queue_processes {
                 dprint(
                     &config,
                     "WARNING",
@@ -245,17 +248,24 @@ fn main() {
                     ),
                 );
                 thread::sleep(Duration::from_secs(1));
-                reap_children(&mut running_pids);
+                reap_children(&mut running_workers);
             }
             if let Some(job) = scheduled_jobs.get(&jobid).cloned() {
-                spawn_job(JobKind::Scheduled, job, &dbinfo, &config, &mut running_pids);
+                spawn_job(
+                    JobKind::Scheduled,
+                    job,
+                    &dbinfo,
+                    &config,
+                    &mut running_workers,
+                    &mut next_worker_id,
+                );
             }
         }
         scheduled_jobs.clear();
 
         let async_keys: Vec<i64> = async_jobs.keys().copied().collect();
         for jobid in async_keys {
-            while running_pids.len() >= config.job_queue_processes {
+            while running_workers.len() >= config.job_queue_processes {
                 dprint(
                     &config,
                     "WARNING",
@@ -265,10 +275,17 @@ fn main() {
                     ),
                 );
                 thread::sleep(Duration::from_secs(1));
-                reap_children(&mut running_pids);
+                reap_children(&mut running_workers);
             }
             if let Some(job) = async_jobs.get(&jobid).cloned() {
-                spawn_job(JobKind::Async, job, &dbinfo, &config, &mut running_pids);
+                spawn_job(
+                    JobKind::Async,
+                    job,
+                    &dbinfo,
+                    &config,
+                    &mut running_workers,
+                    &mut next_worker_id,
+                );
             }
         }
         async_jobs.clear();
@@ -280,7 +297,7 @@ fn main() {
         thread::sleep(Duration::from_secs_f64(config.nap_time));
     }
 
-    wait_all_children(&mut running_pids);
+    wait_all_children(&mut running_workers);
     if Path::new(&config.pidfile).exists()
         && let Err(err) = std::fs::remove_file(&config.pidfile)
     {

@@ -35,9 +35,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let mut args = parse_args();
     if args.config_file.is_empty() {
-        //args.config_file = "/etc/pg_dbms_job/pg_dbms_job.conf".to_string();
-        args.config_file =
-            "/Users/nettrash/Develop/github/pg_dbms_job/data/pg_dbms_job.conf".to_string();
+        args.config_file = "/etc/pg_dbms_job/pg_dbms_job.conf".to_string();
     }
 
     if args.help {

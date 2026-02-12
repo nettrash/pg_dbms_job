@@ -35,11 +35,9 @@ pub fn dprint(config: &Config, level: &str, msg: &str) {
 
     if !fname.is_empty() {
         if let Ok(mut out) = OpenOptions::new().append(true).create(true).open(&fname) {
-            unsafe { libc::flock(out.as_raw_fd(), libc::LOCK_EX) };
             let _ = out
                 .write_all(format!("{t} [{}]: {level}: {msg}\n", process::id()).as_bytes())
                 .and_then(|_| out.flush());
-            unsafe { libc::flock(out.as_raw_fd(), libc::LOCK_UN) };
         } else {
             eprintln!("ERROR: can't write to log file {fname}");
             eprintln!("{t} [{}]: {level}:  {msg}", process::id());

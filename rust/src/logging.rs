@@ -2,10 +2,8 @@
 
 use crate::model::Config;
 use chrono::Local;
-use nix::libc;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process;
 use std::sync::{Mutex, OnceLock};

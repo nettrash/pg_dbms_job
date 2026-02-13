@@ -78,8 +78,8 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 }
                 "job_queue_interval" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        // Time intervals must be positive
-                        if v > 0.0 {
+                        // Time intervals must be positive and finite
+                        if v > 0.0 && v.is_finite() {
                             config.job_queue_interval = v;
                             dprint(
                                 config,
@@ -94,7 +94,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 config,
                                 "ERROR",
                                 &format!(
-                                    "Invalid job_queue_interval value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    "Invalid job_queue_interval value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
                                     val, config.job_queue_interval
                                 ),
                             );
@@ -129,7 +129,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 }
                 "nap_time" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        if v > 0.0 {
+                        if v > 0.0 && v.is_finite() {
                             config.nap_time = v;
                             dprint(
                                 config,
@@ -144,7 +144,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 config,
                                 "ERROR",
                                 &format!(
-                                    "Invalid nap_time value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    "Invalid nap_time value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
                                     val, config.nap_time
                                 ),
                             );
@@ -153,7 +153,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 }
                 "startup_delay" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        if v > 0.0 {
+                        if v > 0.0 && v.is_finite() {
                             config.startup_delay = v;
                             dprint(
                                 config,
@@ -168,7 +168,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 config,
                                 "ERROR",
                                 &format!(
-                                    "Invalid startup_delay value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    "Invalid startup_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
                                     val, config.startup_delay
                                 ),
                             );
@@ -177,7 +177,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 }
                 "error_delay" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        if v > 0.0 {
+                        if v > 0.0 && v.is_finite() {
                             config.error_delay = v;
                             dprint(
                                 config,
@@ -192,7 +192,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 config,
                                 "ERROR",
                                 &format!(
-                                    "Invalid error_delay value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    "Invalid error_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
                                     val, config.error_delay
                                 ),
                             );

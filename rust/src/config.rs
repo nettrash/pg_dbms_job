@@ -78,78 +78,196 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 }
                 "job_queue_interval" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        config.job_queue_interval = v;
-                        dprint(
-                            config,
-                            "LOG",
-                            &format!(
-                                "Setting job_queue_interval from configuration file to {}",
-                                config.job_queue_interval
-                            ),
-                        );
+                        // Time intervals must be positive
+                        if v > 0.0 {
+                            config.job_queue_interval = v;
+                            dprint(
+                                config,
+                                "LOG",
+                                &format!(
+                                    "Setting job_queue_interval from configuration file to {}",
+                                    config.job_queue_interval
+                                ),
+                            );
+                        } else {
+                            dprint(
+                                config,
+                                "ERROR",
+                                &format!(
+                                    "Invalid job_queue_interval value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    val,
+                                    config.job_queue_interval
+                                ),
+                            );
+                        }
                     }
                 }
                 "job_queue_processes" => {
-                    if let Ok(v) = val.parse::<usize>()
-                        && config.job_queue_processes != v
+                    if let Ok(v) = val.parse::<isize>()
                     {
-                        config.job_queue_processes = v;
-                        dprint(
-                            config,
-                            "LOG",
-                            &format!(
-                                "Setting job_queue_processes from configuration file to {}",
-                                config.job_queue_processes
-                            ),
-                        );
+                        // Number of processes must be positive
+                        if v > 0 {
+                            config.job_queue_processes = v.try_into().unwrap_or(config.job_queue_processes);
+                            dprint(
+                                config,
+                                "LOG",
+                                &format!(
+                                    "Setting job_queue_processes from configuration file to {}",
+                                    config.job_queue_processes
+                                ),
+                            );
+                        } else {
+                            dprint(
+                                config,
+                                "ERROR",
+                                &format!(
+                                    "Invalid job_queue_processes value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    val,
+                                    config.job_queue_processes
+                                ),
+                            );
+                        }
                     }
                 }
                 "nap_time" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        config.nap_time = v;
-                        dprint(
-                            config,
-                            "LOG",
-                            &format!(
-                                "Setting nap_time from configuration file to {}",
-                                config.nap_time
-                            ),
-                        );
+                        if v > 0.0 {
+                            config.nap_time = v;
+                            dprint(
+                                config,
+                                "LOG",
+                                &format!(
+                                    "Setting nap_time from configuration file to {}",
+                                    config.nap_time
+                                ),
+                            );
+                        } else {
+                            dprint(
+                                config,
+                                "ERROR",
+                                &format!(
+                                    "Invalid nap_time value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    val,
+                                    config.nap_time
+                                ),
+                            );
+                        }
                     }
                 }
                 "startup_delay" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        config.startup_delay = v;
-                        dprint(
-                            config,
-                            "LOG",
-                            &format!(
-                                "Setting startup_delay from configuration file to {}",
-                                config.startup_delay
-                            ),
-                        );
+                        if v > 0.0 {
+                            config.startup_delay = v;
+                            dprint(
+                                config,
+                                "LOG",
+                                &format!(
+                                    "Setting startup_delay from configuration file to {}",
+                                    config.startup_delay
+                                ),
+                            );
+                        } else {
+                            dprint(
+                                config,
+                                "ERROR",
+                                &format!(
+                                    "Invalid startup_delay value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    val,
+                                    config.startup_delay
+                                ),
+                            );
+                        }
                     }
                 }
                 "error_delay" => {
                     if let Ok(v) = val.parse::<f64>() {
-                        config.error_delay = v;
-                        dprint(
-                            config,
-                            "LOG",
-                            &format!(
-                                "Setting error_delay from configuration file to {}",
-                                config.error_delay
-                            ),
-                        );
+                        if v > 0.0 {
+                            config.error_delay = v;
+                            dprint(
+                                config,
+                                "LOG",
+                                &format!(
+                                    "Setting error_delay from configuration file to {}",
+                                    config.error_delay
+                                ),
+                            );
+                        } else {
+                            dprint(
+                                config,
+                                "ERROR",
+                                &format!(
+                                    "Invalid error_delay value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                    val,
+                                    config.error_delay
+                                ),
+                            );
+                        }
                     }
                 }
-                "host" => dbinfo.host = val,
-                "database" => dbinfo.database = val,
-                "user" => dbinfo.user = val,
-                "passwd" => dbinfo.passwd = val,
+                "host" => {
+                    dbinfo.host = val;
+                    dprint(
+                        config,
+                        "LOG",
+                        &format!(
+                            "Setting host from configuration file to {}",
+                            dbinfo.host
+                        ),
+                    );
+                }
+                "database" => {
+                    dbinfo.database = val;
+                    dprint(
+                        config,
+                        "LOG",
+                        &format!(
+                            "Setting database from configuration file to {}",
+                            dbinfo.database
+                        ),
+                    );
+                }
+                "user" => {
+                    dbinfo.user = val;
+                    dprint(
+                        config,
+                        "LOG",
+                        &format!(
+                            "Setting user from configuration file to {}",
+                            dbinfo.user
+                        ),
+                    );
+                }
+                "passwd" => {
+                    dbinfo.passwd = val;
+                    dprint(
+                        config,
+                        "LOG",
+                        "Setting passwd from configuration file to ****",
+                    );
+                }
                 "port" => {
                     if let Ok(v) = val.parse::<u16>() {
-                        dbinfo.port = v;
+                        if v > 0 {
+                            dbinfo.port = v;
+                            dprint(
+                                config,
+                                "LOG",
+                                &format!(
+                                    "Setting port from configuration file to {}",
+                                    dbinfo.port
+                                ),
+                            );
+                        } else {
+                            dprint(
+                                config,
+                                "ERROR",
+                                &format!(
+                                    "Invalid port value {} in configuration file, must be a positive integer. Ignoring. Actual value remains {}",
+                                    val,
+                                    dbinfo.port
+                                ),
+                            );
+                        }
                     }
                 }
                 "log_truncate_on_rotation" => {

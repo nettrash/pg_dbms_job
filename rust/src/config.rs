@@ -117,6 +117,32 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                         );
                     }
                 }
+                "startup_delay" => {
+                    if let Ok(v) = val.parse::<f64>() {
+                        config.startup_delay = v;
+                        dprint(
+                            config,
+                            "LOG",
+                            &format!(
+                                "Setting startup_delay from configuration file to {}",
+                                config.startup_delay
+                            ),
+                        );
+                    }
+                }
+                "error_delay" => {
+                    if let Ok(v) = val.parse::<f64>() {
+                        config.error_delay = v;
+                        dprint(
+                            config,
+                            "LOG",
+                            &format!(
+                                "Setting error_delay from configuration file to {}",
+                                config.error_delay
+                            ),
+                        );
+                    }
+                }
                 "host" => dbinfo.host = val,
                 "database" => dbinfo.database = val,
                 "user" => dbinfo.user = val,
@@ -184,9 +210,11 @@ mod tests {
             pidfile: "/tmp/pg_dbms_job.pid".to_string(),
             logfile: "".to_string(),
             log_truncate_on_rotation: false,
-            job_queue_interval: 5.0,
-            job_queue_processes: 1000,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
             nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
         };
         let mut dbinfo = DbInfo {
             host: "".to_string(),

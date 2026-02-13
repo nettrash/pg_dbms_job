@@ -1,6 +1,6 @@
 [package]
 name = "pg_dbms_job"
-version = "1.5.2-rust"
+version = "1.5.3-rust"
 edition = "2024"
 
 [dependencies]

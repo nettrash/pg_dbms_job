@@ -141,7 +141,7 @@ fn main() {
                 Ok(client) => dbh = Some(client),
                 Err(err) => {
                     dprint(&config, "ERROR", &err.to_string());
-                    thread::sleep(Duration::from_secs(3));
+                    thread::sleep(Duration::from_secs_f64(config.startup_delay));
                     startup = true;
                     config_invalidated = true;
                     continue;
@@ -183,7 +183,7 @@ fn main() {
                 }
             }
         } else {
-            thread::sleep(Duration::from_secs(3));
+            thread::sleep(Duration::from_secs_f64(config.startup_delay));
             startup = true;
             config_invalidated = true;
             continue;
@@ -225,7 +225,7 @@ fn main() {
             }
             previous_scheduled_exec = Instant::now();
             if config_invalidated {
-                thread::sleep(Duration::from_secs(3));
+                thread::sleep(Duration::from_secs_f64(config.startup_delay));
                 startup = true;
                 continue;
             }
@@ -245,7 +245,7 @@ fn main() {
                         config.job_queue_processes
                     ),
                 );
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
             }
             if let Some(job) = scheduled_jobs.get(&jobid).cloned() {
@@ -272,7 +272,7 @@ fn main() {
                         config.job_queue_processes
                     ),
                 );
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
             }
             if let Some(job) = async_jobs.get(&jobid).cloned() {
@@ -316,9 +316,11 @@ fn default_config() -> Config {
         pidfile: "/tmp/pg_dbms_job.pid".to_string(),
         logfile: "".to_string(),
         log_truncate_on_rotation: false,
-        job_queue_interval: 0.5,
-        job_queue_processes: 100000,
+        job_queue_interval: 0.1,
+        job_queue_processes: 1024,
         nap_time: 0.1,
+        startup_delay: 3.0,
+        error_delay: 0.5,
     }
 }
 
@@ -341,8 +343,8 @@ mod tests {
     fn default_config_values() {
         let config = default_config();
         assert_eq!(config.pidfile, "/tmp/pg_dbms_job.pid");
-        assert_eq!(config.job_queue_processes, 100000);
-        assert_eq!(config.job_queue_interval, 0.5);
+        assert_eq!(config.job_queue_processes, 1024);
+        assert_eq!(config.job_queue_interval, 0.1);
     }
 
     #[test]

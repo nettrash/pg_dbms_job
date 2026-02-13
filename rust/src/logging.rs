@@ -71,6 +71,8 @@ mod tests {
             job_queue_interval: 5.0,
             job_queue_processes: 1000,
             nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 1.0,
         };
         dprint(&config, "LOG", "test message");
         let content = fs::read_to_string(&path).expect("read log file");
@@ -89,6 +91,8 @@ mod tests {
             job_queue_interval: 5.0,
             job_queue_processes: 1000,
             nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 1.0,
         };
         dprint(&config, "DEBUG", "debug message");
         assert!(!path.exists());

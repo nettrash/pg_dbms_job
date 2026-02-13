@@ -17,6 +17,11 @@ pub struct Config {
     pub job_queue_processes: usize,
     /// Sleep time between loops (seconds).
     pub nap_time: f64,
+    /// Initial delay before starting the scheduler or when we need to restart it (seconds).
+    pub startup_delay: f64,
+    /// Delay after an error before retrying (seconds).
+    /// For example when do we reached queue limit.
+    pub error_delay: f64,
 }
 
 #[derive(Clone)]
@@ -70,6 +75,8 @@ mod tests {
             job_queue_interval: 10.0,
             job_queue_processes: 2,
             nap_time: 0.5,
+            startup_delay: 3.0,
+            error_delay: 1.0,
         };
         assert!(config.debug);
         assert_eq!(config.pidfile, "/tmp/test.pid");

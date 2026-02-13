@@ -95,19 +95,18 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 "ERROR",
                                 &format!(
                                     "Invalid job_queue_interval value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
-                                    val,
-                                    config.job_queue_interval
+                                    val, config.job_queue_interval
                                 ),
                             );
                         }
                     }
                 }
                 "job_queue_processes" => {
-                    if let Ok(v) = val.parse::<isize>()
-                    {
+                    if let Ok(v) = val.parse::<isize>() {
                         // Number of processes must be positive
                         if v > 0 {
-                            config.job_queue_processes = v.try_into().unwrap_or(config.job_queue_processes);
+                            config.job_queue_processes =
+                                v.try_into().unwrap_or(config.job_queue_processes);
                             dprint(
                                 config,
                                 "LOG",
@@ -122,8 +121,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 "ERROR",
                                 &format!(
                                     "Invalid job_queue_processes value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
-                                    val,
-                                    config.job_queue_processes
+                                    val, config.job_queue_processes
                                 ),
                             );
                         }
@@ -147,8 +145,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 "ERROR",
                                 &format!(
                                     "Invalid nap_time value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
-                                    val,
-                                    config.nap_time
+                                    val, config.nap_time
                                 ),
                             );
                         }
@@ -172,8 +169,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 "ERROR",
                                 &format!(
                                     "Invalid startup_delay value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
-                                    val,
-                                    config.startup_delay
+                                    val, config.startup_delay
                                 ),
                             );
                         }
@@ -197,8 +193,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 "ERROR",
                                 &format!(
                                     "Invalid error_delay value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
-                                    val,
-                                    config.error_delay
+                                    val, config.error_delay
                                 ),
                             );
                         }
@@ -209,10 +204,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     dprint(
                         config,
                         "LOG",
-                        &format!(
-                            "Setting host from configuration file to {}",
-                            dbinfo.host
-                        ),
+                        &format!("Setting host from configuration file to {}", dbinfo.host),
                     );
                 }
                 "database" => {
@@ -231,10 +223,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     dprint(
                         config,
                         "LOG",
-                        &format!(
-                            "Setting user from configuration file to {}",
-                            dbinfo.user
-                        ),
+                        &format!("Setting user from configuration file to {}", dbinfo.user),
                     );
                 }
                 "passwd" => {
@@ -252,10 +241,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                             dprint(
                                 config,
                                 "LOG",
-                                &format!(
-                                    "Setting port from configuration file to {}",
-                                    dbinfo.port
-                                ),
+                                &format!("Setting port from configuration file to {}", dbinfo.port),
                             );
                         } else {
                             dprint(
@@ -263,8 +249,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                                 "ERROR",
                                 &format!(
                                     "Invalid port value {} in configuration file, must be a positive integer. Ignoring. Actual value remains {}",
-                                    val,
-                                    dbinfo.port
+                                    val, dbinfo.port
                                 ),
                             );
                         }

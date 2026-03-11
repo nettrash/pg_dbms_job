@@ -13,7 +13,8 @@ mod util;
 use crate::args::{parse_args, usage};
 use crate::config::read_config;
 use crate::constants::VERSION;
-use crate::db::connect_db;
+use crate::db::JobPool;
+use crate::db::{connect_db, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, spawn_job};
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo, Job, JobKind};
@@ -91,6 +92,7 @@ fn main() {
     dprint(&config, "LOG", "Entering main loop.");
 
     let mut dbh: Option<Client> = None;
+    let mut job_pool: Option<Arc<JobPool>> = None;
     let mut running_workers: HashMap<u64, JoinHandle<()>> = HashMap::new();
     let mut next_worker_id: u64 = 1;
     let mut scheduled_jobs: HashMap<i64, Job> = HashMap::new();
@@ -134,6 +136,7 @@ fn main() {
 
         if config_invalidated {
             let _ = dbh.take();
+            job_pool = None;
         }
 
         if dbh.is_none() {
@@ -141,6 +144,33 @@ fn main() {
                 Ok(client) => dbh = Some(client),
                 Err(err) => {
                     dprint(&config, "ERROR", &err.to_string());
+                    thread::sleep(Duration::from_secs_f64(config.startup_delay));
+                    startup = true;
+                    config_invalidated = true;
+                    continue;
+                }
+            }
+        }
+
+        if job_pool.is_none() {
+            match create_job_pool(&dbinfo, config.job_queue_processes as u32) {
+                Ok(pool) => {
+                    dprint(
+                        &config,
+                        "LOG",
+                        &format!(
+                            "Connection pool created with max size {}",
+                            config.job_queue_processes
+                        ),
+                    );
+                    job_pool = Some(Arc::new(pool));
+                }
+                Err(err) => {
+                    dprint(
+                        &config,
+                        "ERROR",
+                        &format!("Failed to create connection pool: {err}"),
+                    );
                     thread::sleep(Duration::from_secs_f64(config.startup_delay));
                     startup = true;
                     config_invalidated = true;
@@ -252,7 +282,7 @@ fn main() {
                 spawn_job(
                     JobKind::Scheduled,
                     job,
-                    &dbinfo,
+                    job_pool.as_ref().unwrap(),
                     &config,
                     &mut running_workers,
                     &mut next_worker_id,
@@ -279,7 +309,7 @@ fn main() {
                 spawn_job(
                     JobKind::Async,
                     job,
-                    &dbinfo,
+                    job_pool.as_ref().unwrap(),
                     &config,
                     &mut running_workers,
                     &mut next_worker_id,

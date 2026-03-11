@@ -4,6 +4,10 @@ use crate::logging::dprint;
 use crate::model::{Config, DbInfo};
 use crate::util::die;
 use postgres::{Client, NoTls};
+use r2d2_postgres::PostgresConnectionManager;
+
+pub type JobPool = r2d2::Pool<PostgresConnectionManager<NoTls>>;
+pub type PooledJobClient = r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
 
 /// Connect to the scheduler database and set up notifications.
 ///
@@ -45,12 +49,38 @@ pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, String> {
     Ok(client)
 }
 
-/// Connect to the database for a specific job execution.
-pub fn connect_job_db(dbinfo: &DbInfo, application_name: &str) -> Result<Client, postgres::Error> {
+/// Create a connection pool for job execution.
+pub fn create_job_pool(dbinfo: &DbInfo, pool_size: u32) -> Result<JobPool, String> {
     let conn_str = build_conn_str(dbinfo);
-    let mut client = Client::connect(&conn_str, NoTls)?;
-    client.batch_execute(&format!("SET application_name TO '{application_name}'"))?;
+    let manager = PostgresConnectionManager::new(
+        conn_str
+            .parse()
+            .map_err(|e: postgres::Error| e.to_string())?,
+        NoTls,
+    );
+    r2d2::Pool::builder()
+        .max_size(pool_size)
+        .min_idle(Some(0))
+        .build(manager)
+        .map_err(|e| e.to_string())
+}
+
+/// Get a connection from the pool for a specific job execution.
+pub fn get_job_connection(
+    pool: &JobPool,
+    application_name: &str,
+) -> Result<PooledJobClient, String> {
+    let mut client = pool.get().map_err(|e| e.to_string())?;
+    client
+        .batch_execute(&format!("SET application_name TO '{application_name}'"))
+        .map_err(|e| e.to_string())?;
     Ok(client)
+}
+
+/// Reset session state on a pooled connection after job execution.
+pub fn reset_job_connection(client: &mut PooledJobClient) {
+    let _ = client
+        .batch_execute("RESET ROLE; RESET search_path; SET application_name TO 'pg_dbms_job:idle'");
 }
 
 /// Build a libpq-style connection string from settings.

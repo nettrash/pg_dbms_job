@@ -1,12 +1,13 @@
 //! Job discovery and execution logic.
 
-use crate::db::connect_job_db;
+use crate::db::{JobPool, get_job_connection, reset_job_connection};
 use crate::logging::dprint;
-use crate::model::{Config, DbInfo, Job, JobKind};
+use crate::model::{Config, Job, JobKind};
 use chrono::Local;
 use postgres::Client;
 use std::collections::HashMap;
 use std::process;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -111,7 +112,7 @@ pub fn delete_job(client: &mut Client, config: &Config, jobid: i64) {
 pub fn spawn_job(
     kind: JobKind,
     job: Job,
-    dbinfo: &DbInfo,
+    pool: &Arc<JobPool>,
     config: &Config,
     running_workers: &mut HashMap<u64, JoinHandle<()>>,
     next_worker_id: &mut u64,
@@ -120,13 +121,13 @@ pub fn spawn_job(
     *next_worker_id = next_worker_id.wrapping_add(1);
 
     let job_clone = job.clone();
-    let dbinfo_clone = dbinfo.clone();
+    let pool_clone = Arc::clone(pool);
     let config_clone = config.clone();
 
     let handle = std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
-            JobKind::Async => subprocess_async(job_clone, &dbinfo_clone, &config_clone),
-            JobKind::Scheduled => subprocess_scheduled(job_clone, &dbinfo_clone, &config_clone),
+            JobKind::Async => subprocess_async(job_clone, &pool_clone, &config_clone),
+            JobKind::Scheduled => subprocess_scheduled(job_clone, &pool_clone, &config_clone),
         }));
     });
 
@@ -134,7 +135,7 @@ pub fn spawn_job(
 }
 
 /// Execute an asynchronous job in a child process.
-fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
+fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     dprint(config, "LOG", &format!("executing async job {}", job.job));
 
@@ -145,16 +146,10 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
     );
 
     let app_name = format!("pg_dbms_job:async:{}", job.job);
-    let mut client = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        connect_job_db(dbinfo, &app_name)
-    })) {
-        Ok(Ok(c)) => c,
-        Ok(Err(err)) => {
-            dprint(config, "ERROR", &format!("{err}"));
-            return;
-        }
-        Err(_) => {
-            dprint(config, "ERROR", "connect_job_db panicked");
+    let mut client = match get_job_connection(pool, &app_name) {
+        Ok(c) => c,
+        Err(err) => {
+            dprint(config, "ERROR", &err.to_string());
             return;
         }
     };
@@ -267,10 +262,12 @@ fn subprocess_async(job: Job, dbinfo: &DbInfo, config: &Config) {
         &format!("storing job execution details: {:?}", details),
     );
     let _ = store_job_execution_details(&mut client, details);
+
+    reset_job_connection(&mut client);
 }
 
 /// Execute a scheduled job in a child process.
-fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
+fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     dprint(
         config,
@@ -285,16 +282,10 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
     );
 
     let app_name = format!("pg_dbms_job:scheduled:{}", job.job);
-    let mut client = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        connect_job_db(dbinfo, &app_name)
-    })) {
-        Ok(Ok(c)) => c,
-        Ok(Err(err)) => {
-            dprint(config, "ERROR", &format!("{err}"));
-            return;
-        }
-        Err(_) => {
-            dprint(config, "ERROR", "connect_job_db panicked");
+    let mut client = match get_job_connection(pool, &app_name) {
+        Ok(c) => c,
+        Err(err) => {
+            dprint(config, "ERROR", &err.to_string());
             return;
         }
     };
@@ -406,6 +397,8 @@ fn subprocess_scheduled(job: Job, dbinfo: &DbInfo, config: &Config) {
         &format!("storing job execution details: {:?}", details),
     );
     let _ = store_job_execution_details(&mut client, details);
+
+    reset_job_connection(&mut client);
 }
 
 /// Data captured for job execution history.

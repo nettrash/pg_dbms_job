@@ -79,4 +79,86 @@ mod tests {
         assert_eq!(args.debug_override, Some(true));
         assert!(args.single);
     }
+
+    #[test]
+    fn parse_args_empty_returns_defaults() {
+        let args = parse_args_from(&[]);
+        assert!(args.config_file.is_empty());
+        assert_eq!(args.debug_override, None);
+        assert!(!args.help);
+        assert!(!args.kill);
+        assert!(!args.abort);
+        assert!(!args.reload);
+        assert!(!args.single);
+        assert!(!args.version);
+    }
+
+    #[test]
+    fn parse_args_short_flags() {
+        let argv = vec![
+            "-c".to_string(),
+            "/tmp/short.conf".to_string(),
+            "-d".to_string(),
+            "-s".to_string(),
+        ];
+        let args = parse_args_from(&argv);
+        assert_eq!(args.config_file, "/tmp/short.conf");
+        assert_eq!(args.debug_override, Some(true));
+        assert!(args.single);
+    }
+
+    #[test]
+    fn parse_args_kill_abort_reload_version_help() {
+        let argv = vec!["--kill".to_string()];
+        assert!(parse_args_from(&argv).kill);
+
+        let argv = vec!["-k".to_string()];
+        assert!(parse_args_from(&argv).kill);
+
+        let argv = vec!["-m".to_string()];
+        assert!(parse_args_from(&argv).abort);
+
+        let argv = vec!["--immediate".to_string()];
+        assert!(parse_args_from(&argv).abort);
+
+        let argv = vec!["-r".to_string()];
+        assert!(parse_args_from(&argv).reload);
+
+        let argv = vec!["--reload".to_string()];
+        assert!(parse_args_from(&argv).reload);
+
+        let argv = vec!["-v".to_string()];
+        assert!(parse_args_from(&argv).version);
+
+        let argv = vec!["--version".to_string()];
+        assert!(parse_args_from(&argv).version);
+
+        let argv = vec!["-h".to_string()];
+        assert!(parse_args_from(&argv).help);
+
+        let argv = vec!["--help".to_string()];
+        assert!(parse_args_from(&argv).help);
+    }
+
+    #[test]
+    fn parse_args_no_debug_flag() {
+        let argv = vec!["--no-debug".to_string()];
+        let args = parse_args_from(&argv);
+        assert_eq!(args.debug_override, Some(false));
+    }
+
+    #[test]
+    fn parse_args_unknown_flags_ignored() {
+        let argv = vec!["--unknown".to_string(), "-x".to_string()];
+        let args = parse_args_from(&argv);
+        assert!(args.config_file.is_empty());
+        assert!(!args.help);
+    }
+
+    #[test]
+    fn parse_args_config_without_value() {
+        let argv = vec!["-c".to_string()];
+        let args = parse_args_from(&argv);
+        assert!(args.config_file.is_empty());
+    }
 }

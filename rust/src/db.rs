@@ -112,4 +112,33 @@ mod tests {
         assert!(conn.contains("password=pass"));
         assert!(conn.contains("dbname=db"));
     }
+
+    #[test]
+    fn build_conn_str_different_port() {
+        let dbinfo = DbInfo {
+            host: "192.168.1.1".to_string(),
+            database: "mydb".to_string(),
+            user: "admin".to_string(),
+            passwd: "secret".to_string(),
+            port: 5433,
+        };
+        let conn = build_conn_str(&dbinfo);
+        assert!(conn.contains("host=192.168.1.1"));
+        assert!(conn.contains("port=5433"));
+        assert!(conn.contains("dbname=mydb"));
+    }
+
+    #[test]
+    fn build_conn_str_empty_fields() {
+        let dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let conn = build_conn_str(&dbinfo);
+        assert!(conn.contains("host="));
+        assert!(conn.contains("dbname="));
+    }
 }

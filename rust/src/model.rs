@@ -99,4 +99,78 @@ mod tests {
         assert_eq!(job.job, 1);
         assert!(matches!(JobKind::Async, JobKind::Async));
     }
+
+    #[test]
+    fn config_clone() {
+        let config = Config {
+            debug: true,
+            pidfile: "/tmp/test.pid".to_string(),
+            logfile: "/tmp/test.log".to_string(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 5.0,
+            job_queue_processes: 10,
+            nap_time: 0.1,
+            startup_delay: 1.0,
+            error_delay: 0.5,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.pidfile, config.pidfile);
+        assert_eq!(cloned.debug, config.debug);
+        assert_eq!(cloned.job_queue_processes, config.job_queue_processes);
+    }
+
+    #[test]
+    fn dbinfo_clone() {
+        let dbinfo = DbInfo {
+            host: "host".to_string(),
+            database: "db".to_string(),
+            user: "u".to_string(),
+            passwd: "p".to_string(),
+            port: 5433,
+        };
+        let cloned = dbinfo.clone();
+        assert_eq!(cloned.host, "host");
+        assert_eq!(cloned.port, 5433);
+    }
+
+    #[test]
+    fn job_clone() {
+        let job = Job {
+            job: 42,
+            what: "DO SOMETHING".to_string(),
+            log_user: Some("admin".to_string()),
+            schema_user: Some("public".to_string()),
+        };
+        let cloned = job.clone();
+        assert_eq!(cloned.job, 42);
+        assert_eq!(cloned.what, "DO SOMETHING");
+        assert_eq!(cloned.log_user, Some("admin".to_string()));
+        assert_eq!(cloned.schema_user, Some("public".to_string()));
+    }
+
+    #[test]
+    fn job_with_none_optionals() {
+        let job = Job {
+            job: 0,
+            what: String::new(),
+            log_user: None,
+            schema_user: None,
+        };
+        assert_eq!(job.job, 0);
+        assert!(job.what.is_empty());
+        assert!(job.log_user.is_none());
+        assert!(job.schema_user.is_none());
+    }
+
+    #[test]
+    fn jobkind_copy_and_match() {
+        let kind = JobKind::Async;
+        let copied = kind; // Copy
+        assert!(matches!(copied, JobKind::Async));
+        assert!(matches!(kind, JobKind::Async)); // still usable after copy
+
+        let scheduled = JobKind::Scheduled;
+        assert!(matches!(scheduled, JobKind::Scheduled));
+        assert!(!matches!(scheduled, JobKind::Async));
+    }
 }

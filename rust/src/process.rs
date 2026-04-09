@@ -109,20 +109,86 @@ pub fn wait_all_children(running: &mut HashMap<u64, JoinHandle<()>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::write_pidfile;
+    use super::{read_pid_from_file, reap_children, wait_all_children, write_pidfile};
+    use std::collections::HashMap;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn write_pidfile_creates_file() {
+    fn temp_path(prefix: &str) -> std::path::PathBuf {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("pg_dbms_job_pid_{now}.pid"));
+        std::env::temp_dir().join(format!("{prefix}_{now}"))
+    }
+
+    #[test]
+    fn write_pidfile_creates_file() {
+        let path = temp_path("pg_dbms_job_pid.pid");
         write_pidfile(path.to_str().unwrap());
         let content = fs::read_to_string(&path).expect("read pidfile");
         assert_eq!(content.trim(), std::process::id().to_string());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_pid_from_file_valid() {
+        let path = temp_path("pg_dbms_job_rpid.pid");
+        fs::write(&path, "12345\n").expect("write pid");
+        let pid = read_pid_from_file(path.to_str().unwrap());
+        assert_eq!(pid, Some(12345));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_pid_from_file_invalid_content() {
+        let path = temp_path("pg_dbms_job_rpid_bad.pid");
+        fs::write(&path, "notanumber\n").expect("write pid");
+        let pid = read_pid_from_file(path.to_str().unwrap());
+        assert_eq!(pid, None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_pid_from_file_missing() {
+        let pid = read_pid_from_file("/nonexistent/file.pid");
+        assert_eq!(pid, None);
+    }
+
+    #[test]
+    fn reap_children_empty_map() {
+        let mut running = HashMap::new();
+        reap_children(&mut running);
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn reap_children_removes_finished_threads() {
+        let mut running = HashMap::new();
+        let handle = thread::spawn(|| {});
+        running.insert(1, handle);
+        // Give thread time to finish
+        thread::sleep(Duration::from_millis(50));
+        reap_children(&mut running);
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn wait_all_children_empty_map() {
+        let mut running = HashMap::new();
+        wait_all_children(&mut running);
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn wait_all_children_waits_for_threads() {
+        let mut running = HashMap::new();
+        let handle = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+        });
+        running.insert(1, handle);
+        wait_all_children(&mut running);
+        assert!(running.is_empty());
     }
 }

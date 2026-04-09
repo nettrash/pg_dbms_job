@@ -120,14 +120,13 @@ pub fn spawn_job(
     let worker_id = *next_worker_id;
     *next_worker_id = next_worker_id.wrapping_add(1);
 
-    let job_clone = job.clone();
     let pool_clone = Arc::clone(pool);
     let config_clone = config.clone();
 
     let handle = std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
-            JobKind::Async => subprocess_async(job_clone, &pool_clone, &config_clone),
-            JobKind::Scheduled => subprocess_scheduled(job_clone, &pool_clone, &config_clone),
+            JobKind::Async => subprocess_async(job, &pool_clone, &config_clone),
+            JobKind::Scheduled => subprocess_scheduled(job, &pool_clone, &config_clone),
         }));
     });
 
@@ -161,8 +160,9 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     );
 
     if let Some(log_user) = &job.log_user {
-        dprint(config, "DEBUG", &format!("SET ROLE {log_user}"));
-        if let Err(err) = client.batch_execute(&format!("SET ROLE {log_user}")) {
+        let quoted = quote_ident(log_user);
+        dprint(config, "DEBUG", &format!("SET ROLE {quoted}"));
+        if let Err(err) = client.batch_execute(&format!("SET ROLE {quoted}")) {
             dprint(
                 config,
                 "ERROR",
@@ -185,12 +185,13 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     }
 
     if let Some(schema_user) = &job.schema_user {
+        let quoted = quote_ident(schema_user);
         dprint(
             config,
             "DEBUG",
-            &format!("SET LOCAL search_path TO {schema_user}"),
+            &format!("SET LOCAL search_path TO {quoted}"),
         );
-        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
+        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {quoted}")) {
             dprint(
                 config,
                 "ERROR",
@@ -297,7 +298,7 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     );
 
     if let Some(log_user) = &job.log_user
-        && let Err(err) = client.batch_execute(&format!("SET ROLE {log_user}"))
+        && let Err(err) = client.batch_execute(&format!("SET ROLE {}", quote_ident(log_user)))
     {
         dprint(
             config,
@@ -319,7 +320,10 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     }
 
     if let Some(schema_user) = &job.schema_user
-        && let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}"))
+        && let Err(err) = client.batch_execute(&format!(
+            "SET LOCAL search_path TO {}",
+            quote_ident(schema_user)
+        ))
     {
         dprint(
             config,
@@ -401,6 +405,11 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     reset_job_connection(&mut client);
 }
 
+/// Escape a PostgreSQL identifier with double-quote quoting.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
 /// Data captured for job execution history.
 #[derive(Debug)]
 struct JobExecutionDetails<'a> {
@@ -478,7 +487,7 @@ fn build_do_block(jobid: i64, what: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_do_block;
+    use super::{build_do_block, quote_ident};
 
     #[test]
     fn build_do_block_includes_job_and_code() {
@@ -487,5 +496,54 @@ mod tests {
         assert!(block.contains("job bigint := 42"));
         assert!(block.contains(code));
         assert!(block.contains("DO $pg_dbms_job$"));
+    }
+
+    #[test]
+    fn build_do_block_structure() {
+        let block = build_do_block(1, "NULL;");
+        assert!(block.starts_with("DO $pg_dbms_job$\n"));
+        assert!(block.contains("DECLARE\n"));
+        assert!(block.contains("BEGIN\n"));
+        assert!(block.contains("\nEND;\n$pg_dbms_job$;"));
+        assert!(block.contains("next_date timestamp with time zone"));
+        assert!(block.contains("broken boolean := false"));
+    }
+
+    #[test]
+    fn build_do_block_negative_jobid() {
+        let block = build_do_block(-1, "SELECT 1;");
+        assert!(block.contains("job bigint := -1"));
+    }
+
+    #[test]
+    fn quote_ident_simple() {
+        assert_eq!(quote_ident("myuser"), "\"myuser\"");
+    }
+
+    #[test]
+    fn quote_ident_with_double_quotes() {
+        assert_eq!(quote_ident("my\"user"), "\"my\"\"user\"");
+    }
+
+    #[test]
+    fn quote_ident_empty() {
+        assert_eq!(quote_ident(""), "\"\"");
+    }
+
+    #[test]
+    fn quote_ident_multiple_quotes() {
+        assert_eq!(quote_ident("a\"b\"c"), "\"a\"\"b\"\"c\"");
+    }
+
+    #[test]
+    fn quote_ident_with_spaces() {
+        assert_eq!(quote_ident("my user"), "\"my user\"");
+    }
+
+    #[test]
+    fn quote_ident_sql_injection_attempt() {
+        let result = quote_ident("admin\"; DROP TABLE users; --");
+        // The embedded double-quote is doubled, preventing breakout
+        assert_eq!(result, "\"admin\"\"; DROP TABLE users; --\"");
     }
 }

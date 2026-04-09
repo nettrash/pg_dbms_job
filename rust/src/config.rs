@@ -25,10 +25,9 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
         }
     }
     let content = content.unwrap();
-    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
     // Load logfile first so subsequent logs go to the configured location.
-    for line in &lines {
+    for line in content.lines() {
         if let Some((var, val)) = parse_config_line(line)
             && var == "logfile"
             && config.logfile != val
@@ -46,7 +45,7 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
     }
 
     // Apply remaining settings and database connection information.
-    for line in &lines {
+    for line in content.lines() {
         if let Some((var, val)) = parse_config_line(line) {
             match var.as_str() {
                 "pidfile" => {
@@ -290,6 +289,14 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn temp_path(prefix: &str) -> std::path::PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{now}"))
+    }
+
     #[test]
     fn parse_config_line_basic() {
         let parsed = parse_config_line("host = localhost");
@@ -304,6 +311,36 @@ mod tests {
             parsed,
             Some(("logfile".to_string(), "/tmp/test.log".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_config_line_empty() {
+        assert_eq!(parse_config_line(""), None);
+        assert_eq!(parse_config_line("   "), None);
+        assert_eq!(parse_config_line("  \t  "), None);
+    }
+
+    #[test]
+    fn parse_config_line_no_equals() {
+        assert_eq!(parse_config_line("no_equals_here"), None);
+    }
+
+    #[test]
+    fn parse_config_line_strips_carriage_return() {
+        let parsed = parse_config_line("host = myhost\r");
+        assert_eq!(parsed, Some(("host".to_string(), "myhost".to_string())));
+    }
+
+    #[test]
+    fn parse_config_line_value_with_equals() {
+        let parsed = parse_config_line("passwd = a=b=c");
+        assert_eq!(parsed, Some(("passwd".to_string(), "a=b=c".to_string())));
+    }
+
+    #[test]
+    fn parse_config_line_case_insensitive_key() {
+        let parsed = parse_config_line("HOST = myhost");
+        assert_eq!(parsed, Some(("host".to_string(), "myhost".to_string())));
     }
 
     #[test]
@@ -327,11 +364,7 @@ mod tests {
             port: 5432,
         };
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("pg_dbms_job_test_{now}.conf"));
+        let path = temp_path("pg_dbms_job_test.conf");
         let content = r#"
 pidfile=/tmp/pg_dbms_job_test.pid
 debug=1
@@ -360,6 +393,112 @@ log_truncate_on_rotation=1
         assert_eq!(dbinfo.user, "tester");
         assert_eq!(dbinfo.passwd, "secret");
         assert_eq!(dbinfo.port, 5433);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_missing_file_nodie() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        // Should not panic when nodie=true
+        read_config("/nonexistent/path.conf", &mut config, &mut dbinfo, true);
+        // Values should remain unchanged
+        assert_eq!(config.pidfile, "/tmp/pg_dbms_job.pid");
+        assert_eq!(dbinfo.port, 5432);
+    }
+
+    #[test]
+    fn read_config_invalid_numeric_values_ignored() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_invalid.conf");
+        let content = r#"
+job_queue_interval=-1.0
+job_queue_processes=-5
+nap_time=0
+startup_delay=-0.5
+error_delay=NaN
+port=notanumber
+"#;
+        fs::write(&path, content).expect("write temp config");
+
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+
+        // All values should remain at defaults since the config values are invalid
+        assert_eq!(config.job_queue_interval, 0.1);
+        assert_eq!(config.job_queue_processes, 1024);
+        assert_eq!(config.nap_time, 0.1);
+        assert_eq!(config.startup_delay, 3.0);
+        assert_eq!(config.error_delay, 0.5);
+        assert_eq!(dbinfo.port, 5432);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_startup_and_error_delay() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_delays.conf");
+        let content = "startup_delay=5.5\nerror_delay=2.0\n";
+        fs::write(&path, content).expect("write temp config");
+
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+
+        assert_eq!(config.startup_delay, 5.5);
+        assert_eq!(config.error_delay, 2.0);
 
         let _ = fs::remove_file(path);
     }

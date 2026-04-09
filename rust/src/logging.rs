@@ -14,10 +14,11 @@ pub fn dprint(config: &Config, level: &str, msg: &str) {
         return;
     }
     let t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut fname = config.logfile.clone();
-    if fname.contains('%') {
-        fname = Local::now().format(&fname).to_string();
-    }
+    let fname = if config.logfile.contains('%') {
+        Local::now().format(&config.logfile).to_string()
+    } else {
+        config.logfile.clone()
+    };
 
     if config.log_truncate_on_rotation {
         // Track previous log file name to support truncate-on-rotation.
@@ -33,9 +34,8 @@ pub fn dprint(config: &Config, level: &str, msg: &str) {
 
     if !fname.is_empty() {
         if let Ok(mut out) = OpenOptions::new().append(true).create(true).open(&fname) {
-            let _ = out
-                .write_all(format!("{t} [{}]: {level}: {msg}\n", process::id()).as_bytes())
-                .and_then(|_| out.flush());
+            let _ =
+                writeln!(out, "{t} [{}]: {level}: {msg}", process::id()).and_then(|_| out.flush());
         } else {
             eprintln!("ERROR: can't write to log file {fname}");
             eprintln!("{t} [{}]: {level}:  {msg}", process::id());
@@ -60,11 +60,9 @@ mod tests {
         std::env::temp_dir().join(format!("pg_dbms_job_log_{now}.log"))
     }
 
-    #[test]
-    fn dprint_writes_to_logfile() {
-        let path = temp_log_path();
-        let config = Config {
-            debug: true,
+    fn test_config(path: &std::path::Path, debug: bool) -> Config {
+        Config {
+            debug,
             pidfile: "/tmp/pg_dbms_job.pid".to_string(),
             logfile: path.to_string_lossy().to_string(),
             log_truncate_on_rotation: false,
@@ -73,7 +71,13 @@ mod tests {
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 1.0,
-        };
+        }
+    }
+
+    #[test]
+    fn dprint_writes_to_logfile() {
+        let path = temp_log_path();
+        let config = test_config(&path, true);
         dprint(&config, "LOG", "test message");
         let content = fs::read_to_string(&path).expect("read log file");
         assert!(content.contains("test message"));
@@ -83,10 +87,40 @@ mod tests {
     #[test]
     fn dprint_skips_debug_when_disabled() {
         let path = temp_log_path();
+        let config = test_config(&path, false);
+        dprint(&config, "DEBUG", "debug message");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn dprint_writes_debug_when_enabled() {
+        let path = temp_log_path();
+        let config = test_config(&path, true);
+        dprint(&config, "DEBUG", "visible debug");
+        let content = fs::read_to_string(&path).expect("read log file");
+        assert!(content.contains("visible debug"));
+        assert!(content.contains("DEBUG"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dprint_log_format_contains_level_and_pid() {
+        let path = temp_log_path();
+        let config = test_config(&path, false);
+        dprint(&config, "WARNING", "warn msg");
+        let content = fs::read_to_string(&path).expect("read log file");
+        assert!(content.contains("WARNING"));
+        assert!(content.contains("warn msg"));
+        assert!(content.contains(&format!("[{}]", std::process::id())));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dprint_empty_logfile_no_crash() {
         let config = Config {
-            debug: false,
+            debug: true,
             pidfile: "/tmp/pg_dbms_job.pid".to_string(),
-            logfile: path.to_string_lossy().to_string(),
+            logfile: String::new(),
             log_truncate_on_rotation: false,
             job_queue_interval: 5.0,
             job_queue_processes: 1000,
@@ -94,7 +128,21 @@ mod tests {
             startup_delay: 3.0,
             error_delay: 1.0,
         };
-        dprint(&config, "DEBUG", "debug message");
-        assert!(!path.exists());
+        // Should print to stderr without crashing
+        dprint(&config, "LOG", "stderr fallback");
+    }
+
+    #[test]
+    fn dprint_multiple_messages_appended() {
+        let path = temp_log_path();
+        let config = test_config(&path, false);
+        dprint(&config, "LOG", "first");
+        dprint(&config, "LOG", "second");
+        let content = fs::read_to_string(&path).expect("read log file");
+        assert!(content.contains("first"));
+        assert!(content.contains("second"));
+        // Should be on separate lines
+        assert!(content.lines().count() >= 2);
+        let _ = fs::remove_file(path);
     }
 }

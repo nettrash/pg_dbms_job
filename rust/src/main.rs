@@ -264,8 +264,7 @@ fn main() {
         config_invalidated = false;
         startup = false;
 
-        let scheduled_keys: Vec<i64> = scheduled_jobs.keys().copied().collect();
-        for jobid in scheduled_keys {
+        for (_, job) in scheduled_jobs.drain() {
             while running_workers.len() >= config.job_queue_processes {
                 dprint(
                     &config,
@@ -278,21 +277,17 @@ fn main() {
                 thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
             }
-            if let Some(job) = scheduled_jobs.get(&jobid).cloned() {
-                spawn_job(
-                    JobKind::Scheduled,
-                    job,
-                    job_pool.as_ref().unwrap(),
-                    &config,
-                    &mut running_workers,
-                    &mut next_worker_id,
-                );
-            }
+            spawn_job(
+                JobKind::Scheduled,
+                job,
+                job_pool.as_ref().unwrap(),
+                &config,
+                &mut running_workers,
+                &mut next_worker_id,
+            );
         }
-        scheduled_jobs.clear();
 
-        let async_keys: Vec<i64> = async_jobs.keys().copied().collect();
-        for jobid in async_keys {
+        for (_, job) in async_jobs.drain() {
             while running_workers.len() >= config.job_queue_processes {
                 dprint(
                     &config,
@@ -305,18 +300,15 @@ fn main() {
                 thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
             }
-            if let Some(job) = async_jobs.get(&jobid).cloned() {
-                spawn_job(
-                    JobKind::Async,
-                    job,
-                    job_pool.as_ref().unwrap(),
-                    &config,
-                    &mut running_workers,
-                    &mut next_worker_id,
-                );
-            }
+            spawn_job(
+                JobKind::Async,
+                job,
+                job_pool.as_ref().unwrap(),
+                &config,
+                &mut running_workers,
+                &mut next_worker_id,
+            );
         }
-        async_jobs.clear();
 
         if args.single {
             break;
@@ -344,7 +336,7 @@ fn default_config() -> Config {
     Config {
         debug: false,
         pidfile: "/tmp/pg_dbms_job.pid".to_string(),
-        logfile: "".to_string(),
+        logfile: String::new(),
         log_truncate_on_rotation: false,
         job_queue_interval: 0.1,
         job_queue_processes: 1024,
@@ -357,10 +349,10 @@ fn default_config() -> Config {
 /// Default database connection settings.
 fn default_dbinfo() -> DbInfo {
     DbInfo {
-        host: "".to_string(),
-        database: "".to_string(),
-        user: "".to_string(),
-        passwd: "".to_string(),
+        host: String::new(),
+        database: String::new(),
+        user: String::new(),
+        passwd: String::new(),
         port: 5432,
     }
 }

@@ -14,7 +14,7 @@ use crate::args::{parse_args, usage};
 use crate::config::read_config;
 use crate::constants::VERSION;
 use crate::db::JobPool;
-use crate::db::{connect_db, create_job_pool};
+use crate::db::{ConnectError, connect_db, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, spawn_job};
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo, Job, JobKind};
@@ -142,6 +142,17 @@ fn main() {
         if dbh.is_none() {
             match connect_db(&dbinfo, &config) {
                 Ok(client) => dbh = Some(client),
+                Err(ConnectError::InRecovery) => {
+                    dprint(
+                        &config,
+                        "WARNING",
+                        "database is in recovery, retrying later",
+                    );
+                    thread::sleep(Duration::from_secs_f64(config.startup_delay));
+                    startup = true;
+                    config_invalidated = true;
+                    continue;
+                }
                 Err(err) => {
                     dprint(&config, "ERROR", &err.to_string());
                     thread::sleep(Duration::from_secs_f64(config.startup_delay));

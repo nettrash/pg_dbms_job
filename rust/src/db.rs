@@ -5,26 +5,46 @@ use crate::model::{Config, DbInfo};
 use crate::util::die;
 use postgres::{Client, NoTls};
 use r2d2_postgres::PostgresConnectionManager;
+use std::fmt;
 
 pub type JobPool = r2d2::Pool<PostgresConnectionManager<NoTls>>;
 pub type PooledJobClient = r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
 
+/// Error type for database connection failures.
+#[derive(Debug)]
+pub enum ConnectError {
+    /// The database is a replica in recovery mode.
+    InRecovery,
+    /// Any other connection error.
+    Other(String),
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConnectError::InRecovery => write!(f, "database is in recovery"),
+            ConnectError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Connect to the scheduler database and set up notifications.
 ///
 /// Returns an error if another scheduler instance is already running.
-pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, String> {
+pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, ConnectError> {
     let conn_str = build_conn_str(dbinfo);
-    let mut client = Client::connect(&conn_str, NoTls).map_err(|e| e.to_string())?;
+    let mut client =
+        Client::connect(&conn_str, NoTls).map_err(|e| ConnectError::Other(e.to_string()))?;
     client
         .batch_execute("SET application_name TO 'pg_dbms_job:main'")
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ConnectError::Other(e.to_string()))?;
 
     let row = client
         .query_one(
             "SELECT count(*), pg_is_in_recovery() FROM pg_catalog.pg_stat_activity WHERE datname=$1 AND application_name='pg_dbms_job:main'",
             &[&dbinfo.database],
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ConnectError::Other(e.to_string()))?;
     let count: i64 = row.get(0);
     let in_recovery: bool = row.get(1);
     if count > 1 {
@@ -36,15 +56,15 @@ pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, String> {
         die("FATAL: another pg_dbms_job process is running on this database! Aborting.");
     }
     if in_recovery {
-        return Err("database is in recovery".to_string());
+        return Err(ConnectError::InRecovery);
     }
 
     client
         .batch_execute("LISTEN dbms_job_scheduled_notify")
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ConnectError::Other(e.to_string()))?;
     client
         .batch_execute("LISTEN dbms_job_async_notify")
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ConnectError::Other(e.to_string()))?;
 
     Ok(client)
 }
@@ -93,8 +113,45 @@ fn build_conn_str(dbinfo: &DbInfo) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_conn_str;
+    use super::{ConnectError, build_conn_str};
     use crate::model::DbInfo;
+
+    #[test]
+    fn connect_error_in_recovery_display() {
+        let err = ConnectError::InRecovery;
+        assert_eq!(err.to_string(), "database is in recovery");
+    }
+
+    #[test]
+    fn connect_error_other_display() {
+        let err = ConnectError::Other("connection refused".to_string());
+        assert_eq!(err.to_string(), "connection refused");
+    }
+
+    #[test]
+    fn connect_error_in_recovery_debug() {
+        let err = ConnectError::InRecovery;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("InRecovery"));
+    }
+
+    #[test]
+    fn connect_error_other_debug() {
+        let err = ConnectError::Other("timeout".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Other"));
+        assert!(debug.contains("timeout"));
+    }
+
+    #[test]
+    fn connect_error_variants_are_distinct() {
+        let recovery = ConnectError::InRecovery;
+        let other = ConnectError::Other("database is in recovery".to_string());
+        // Both display the same text, but the enum discriminant differs
+        assert_eq!(recovery.to_string(), other.to_string());
+        assert!(matches!(recovery, ConnectError::InRecovery));
+        assert!(matches!(other, ConnectError::Other(_)));
+    }
 
     #[test]
     fn build_conn_str_includes_fields() {

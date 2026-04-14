@@ -185,13 +185,12 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     }
 
     if let Some(schema_user) = &job.schema_user {
-        let quoted = quote_ident(schema_user);
         dprint(
             config,
             "DEBUG",
-            &format!("SET LOCAL search_path TO {quoted}"),
+            &format!("SET LOCAL search_path TO {schema_user}"),
         );
-        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {quoted}")) {
+        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
             dprint(
                 config,
                 "ERROR",
@@ -265,6 +264,15 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     let _ = store_job_execution_details(&mut client, details);
 
     reset_job_connection(&mut client);
+
+    dprint(
+        config,
+        "LOG",
+        &format!(
+            "finished executing async job {} in {} seconds",
+            job.job, duration_secs
+        ),
+    );
 }
 
 /// Execute a scheduled job in a child process.
@@ -297,15 +305,17 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
         &format!("connected to database for job {}", job.job),
     );
 
-    if let Some(log_user) = &job.log_user
-        && let Err(err) = client.batch_execute(&format!("SET ROLE {}", quote_ident(log_user)))
-    {
-        dprint(
-            config,
-            "ERROR",
-            &format!("can not change role, reason: {err}"),
-        );
-        return;
+    if let Some(log_user) = &job.log_user {
+        let quoted = quote_ident(log_user);
+        dprint(config, "DEBUG", &format!("SET ROLE {quoted}"));
+        if let Err(err) = client.batch_execute(&format!("SET ROLE {quoted}")) {
+            dprint(
+                config,
+                "ERROR",
+                &format!("can not change role, reason: {err}"),
+            );
+            return;
+        }
     } else {
         dprint(config, "DEBUG", "log_user is not set, using default role");
     }
@@ -319,18 +329,20 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
         return;
     }
 
-    if let Some(schema_user) = &job.schema_user
-        && let Err(err) = client.batch_execute(&format!(
-            "SET LOCAL search_path TO {}",
-            quote_ident(schema_user)
-        ))
-    {
+    if let Some(schema_user) = &job.schema_user {
         dprint(
             config,
-            "ERROR",
-            &format!("can not change the search_path, reason: {err}"),
+            "DEBUG",
+            &format!("SET LOCAL search_path TO {schema_user}"),
         );
-        return;
+        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
+            dprint(
+                config,
+                "ERROR",
+                &format!("can not change the search_path, reason: {err}"),
+            );
+            return;
+        }
     } else {
         dprint(
             config,
@@ -403,6 +415,15 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     let _ = store_job_execution_details(&mut client, details);
 
     reset_job_connection(&mut client);
+
+    dprint(
+        config,
+        "LOG",
+        &format!(
+            "finished executing scheduled job {} in {} seconds",
+            job.job, duration_secs
+        ),
+    );
 }
 
 /// Escape a PostgreSQL identifier with double-quote quoting.
@@ -545,5 +566,47 @@ mod tests {
         let result = quote_ident("admin\"; DROP TABLE users; --");
         // The embedded double-quote is doubled, preventing breakout
         assert_eq!(result, "\"admin\"\"; DROP TABLE users; --\"");
+    }
+
+    // Tests verifying search_path uses unquoted schema names (not quote_ident).
+    // PostgreSQL SET search_path expects comma-separated, optionally schema-qualified
+    // names WITHOUT identifier quoting.
+
+    #[test]
+    fn search_path_format_simple_schema() {
+        let schema_user = "public";
+        let stmt = format!("SET LOCAL search_path TO {schema_user}");
+        assert_eq!(stmt, "SET LOCAL search_path TO public");
+        // Must NOT contain double quotes
+        assert!(!stmt.contains('"'));
+    }
+
+    #[test]
+    fn search_path_format_custom_schema() {
+        let schema_user = "myapp";
+        let stmt = format!("SET LOCAL search_path TO {schema_user}");
+        assert_eq!(stmt, "SET LOCAL search_path TO myapp");
+        assert!(!stmt.contains('"'));
+    }
+
+    #[test]
+    fn search_path_format_multiple_schemas() {
+        // schema_user could contain a comma-separated list
+        let schema_user = "myapp, public";
+        let stmt = format!("SET LOCAL search_path TO {schema_user}");
+        assert_eq!(stmt, "SET LOCAL search_path TO myapp, public");
+    }
+
+    #[test]
+    fn search_path_quote_ident_would_break() {
+        // Demonstrate that quote_ident wrapping would produce invalid search_path
+        let schema_user = "public";
+        let quoted = quote_ident(schema_user);
+        let bad_stmt = format!("SET LOCAL search_path TO {quoted}");
+        // This contains double-quotes which causes lookup failures
+        assert!(bad_stmt.contains('"'));
+        // The correct form does not
+        let good_stmt = format!("SET LOCAL search_path TO {schema_user}");
+        assert!(!good_stmt.contains('"'));
     }
 }

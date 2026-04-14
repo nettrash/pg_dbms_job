@@ -101,6 +101,7 @@ fn main() {
     let mut previous_scheduled_exec = Instant::now();
     let mut startup = true;
     let mut config_invalidated = false;
+    let mut in_recovery_logged = false;
 
     while !terminate_flag.load(Ordering::Relaxed) {
         reap_children(&mut running_workers);
@@ -141,13 +142,22 @@ fn main() {
 
         if dbh.is_none() {
             match connect_db(&dbinfo, &config) {
-                Ok(client) => dbh = Some(client),
+                Ok(client) => {
+                    if in_recovery_logged {
+                        dprint(&config, "LOG", "database has exited recovery mode");
+                        in_recovery_logged = false;
+                    }
+                    dbh = Some(client);
+                }
                 Err(ConnectError::InRecovery) => {
-                    dprint(
-                        &config,
-                        "WARNING",
-                        "database is in recovery, retrying later",
-                    );
+                    if !in_recovery_logged {
+                        dprint(
+                            &config,
+                            "WARNING",
+                            "database is in recovery, retrying later",
+                        );
+                        in_recovery_logged = true;
+                    }
                     thread::sleep(Duration::from_secs_f64(config.startup_delay));
                     startup = true;
                     config_invalidated = true;

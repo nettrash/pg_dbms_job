@@ -16,7 +16,7 @@ use crate::constants::VERSION;
 use crate::db::JobPool;
 use crate::db::{ConnectError, connect_db, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, spawn_job};
-use crate::logging::dprint;
+use crate::logging::{dprint, shutdown_logger};
 use crate::model::{Config, DbInfo, Job, JobKind};
 use crate::process::{daemonize, reap_children, signal_handling, wait_all_children, write_pidfile};
 use crate::util::die;
@@ -112,23 +112,21 @@ fn main() {
             read_config(&args.config_file, &mut config, &mut dbinfo, true);
             if old_pidfile != config.pidfile {
                 if let Err(err) = std::fs::rename(&old_pidfile, &config.pidfile) {
-                    dprint(
+                    dlog!(
                         &config,
                         "ERROR",
-                        &format!(
-                            "can't change path to pid keeping old one {}, {}",
-                            old_pidfile, err
-                        ),
+                        "can't change path to pid keeping old one {}, {}",
+                        old_pidfile,
+                        err
                     );
                     config.pidfile = old_pidfile;
                 } else {
-                    dprint(
+                    dlog!(
                         &config,
                         "LOG",
-                        &format!(
-                            "path to pid file has changed, rename {} into {}",
-                            old_pidfile, config.pidfile
-                        ),
+                        "path to pid file has changed, rename {} into {}",
+                        old_pidfile,
+                        config.pidfile
                     );
                 }
             }
@@ -164,7 +162,7 @@ fn main() {
                     continue;
                 }
                 Err(err) => {
-                    dprint(&config, "ERROR", &err.to_string());
+                    dlog!(&config, "ERROR", "{}", err);
                     thread::sleep(Duration::from_secs_f64(config.startup_delay));
                     startup = true;
                     config_invalidated = true;
@@ -176,22 +174,16 @@ fn main() {
         if job_pool.is_none() {
             match create_job_pool(&dbinfo, config.job_queue_processes as u32) {
                 Ok(pool) => {
-                    dprint(
+                    dlog!(
                         &config,
                         "LOG",
-                        &format!(
-                            "Connection pool created with max size {}",
-                            config.job_queue_processes
-                        ),
+                        "Connection pool created with max size {}",
+                        config.job_queue_processes
                     );
                     job_pool = Some(Arc::new(pool));
                 }
                 Err(err) => {
-                    dprint(
-                        &config,
-                        "ERROR",
-                        &format!("Failed to create connection pool: {err}"),
-                    );
+                    dlog!(&config, "ERROR", "Failed to create connection pool: {err}");
                     thread::sleep(Duration::from_secs_f64(config.startup_delay));
                     startup = true;
                     config_invalidated = true;
@@ -210,15 +202,13 @@ fn main() {
             loop {
                 match iter.next() {
                     Ok(Some(notification)) => {
-                        dprint(
+                        dlog!(
                             &config,
                             "DEBUG",
-                            &format!(
-                                "Received notification: ({}, {}, {})",
-                                notification.channel(),
-                                notification.process_id(),
-                                notification.payload()
-                            ),
+                            "Received notification: ({}, {}, {})",
+                            notification.channel(),
+                            notification.process_id(),
+                            notification.payload()
                         );
                         if notification.channel() == "dbms_job_async_notify" {
                             async_count += 1;
@@ -228,7 +218,7 @@ fn main() {
                     }
                     Ok(None) => break,
                     Err(err) => {
-                        dprint(&config, "ERROR", &format!("notification error: {err}"));
+                        dlog!(&config, "ERROR", "notification error: {err}");
                         break;
                     }
                 }
@@ -287,13 +277,11 @@ fn main() {
 
         for (_, job) in scheduled_jobs.drain() {
             while running_workers.len() >= config.job_queue_processes {
-                dprint(
+                dlog!(
                     &config,
                     "WARNING",
-                    &format!(
-                        "max job queue size is reached ({}) waiting the end of an other job",
-                        config.job_queue_processes
-                    ),
+                    "max job queue size is reached ({}) waiting the end of an other job",
+                    config.job_queue_processes
                 );
                 thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
@@ -310,13 +298,11 @@ fn main() {
 
         for (_, job) in async_jobs.drain() {
             while running_workers.len() >= config.job_queue_processes {
-                dprint(
+                dlog!(
                     &config,
                     "WARNING",
-                    &format!(
-                        "max job queue size is reached ({}) waiting the end of an other job",
-                        config.job_queue_processes
-                    ),
+                    "max job queue size is reached ({}) waiting the end of an other job",
+                    config.job_queue_processes
                 );
                 thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
@@ -342,14 +328,17 @@ fn main() {
     if Path::new(&config.pidfile).exists()
         && let Err(err) = std::fs::remove_file(&config.pidfile)
     {
-        dprint(
+        dlog!(
             &config,
             "ERROR",
-            &format!("Unable to remove pid file {}, {}", config.pidfile, err),
+            "Unable to remove pid file {}, {}",
+            config.pidfile,
+            err
         );
     }
 
     dprint(&config, "LOG", "pg_dbms_job scheduler stopped.");
+    shutdown_logger();
 }
 
 /// Default scheduler configuration values.
@@ -395,5 +384,32 @@ mod tests {
         let dbinfo = default_dbinfo();
         assert_eq!(dbinfo.port, 5432);
         assert!(dbinfo.host.is_empty());
+    }
+
+    #[test]
+    fn default_config_debug_off() {
+        let config = default_config();
+        assert!(!config.debug);
+    }
+
+    #[test]
+    fn default_config_logfile_empty() {
+        let config = default_config();
+        assert!(config.logfile.is_empty());
+    }
+
+    #[test]
+    fn default_config_nap_time() {
+        let config = default_config();
+        assert!(config.nap_time > 0.0);
+    }
+
+    #[test]
+    fn default_dbinfo_all_strings_empty() {
+        let dbinfo = default_dbinfo();
+        assert!(dbinfo.host.is_empty());
+        assert!(dbinfo.database.is_empty());
+        assert!(dbinfo.user.is_empty());
+        assert!(dbinfo.passwd.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 //! Process management helpers for daemonization and signals.
 
 use crate::constants::PROGRAM;
-use crate::logging::dprint;
+use crate::dlog;
 use crate::model::Config;
 use crate::util::die;
 use nix::sys::signal::{Signal, kill};
@@ -26,10 +26,11 @@ pub fn daemonize(config: &Config) {
     if let Err(err) = setsid() {
         die(&format!("Can't detach: {err}"));
     }
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("Detach from terminal with pid: {}", process::id()),
+        "Detach from terminal with pid: {}",
+        process::id()
     );
 
     let _ = OpenOptions::new()
@@ -189,6 +190,125 @@ mod tests {
         });
         running.insert(1, handle);
         wait_all_children(&mut running);
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn read_pid_from_file_with_whitespace() {
+        let path = temp_path("pg_dbms_job_rpid_ws.pid");
+        fs::write(&path, "  99999  \n").expect("write pid");
+        let pid = read_pid_from_file(path.to_str().unwrap());
+        assert_eq!(pid, Some(99999));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_pid_from_file_empty() {
+        let path = temp_path("pg_dbms_job_rpid_empty.pid");
+        fs::write(&path, "").expect("write pid");
+        let pid = read_pid_from_file(path.to_str().unwrap());
+        assert_eq!(pid, None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_pid_from_file_negative_pid() {
+        let path = temp_path("pg_dbms_job_rpid_neg.pid");
+        fs::write(&path, "-1\n").expect("write pid");
+        let pid = read_pid_from_file(path.to_str().unwrap());
+        assert_eq!(pid, Some(-1));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn write_pidfile_overwrites_existing() {
+        let path = temp_path("pg_dbms_job_pid_overwrite.pid");
+        fs::write(&path, "old content").expect("write old");
+        write_pidfile(path.to_str().unwrap());
+        let content = fs::read_to_string(&path).expect("read pidfile");
+        assert_eq!(content.trim(), std::process::id().to_string());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn write_pidfile_contains_trailing_newline() {
+        let path = temp_path("pg_dbms_job_pid_nl.pid");
+        write_pidfile(path.to_str().unwrap());
+        let content = fs::read_to_string(&path).expect("read pidfile");
+        assert!(content.ends_with('\n'));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reap_children_keeps_running_threads() {
+        let mut running = HashMap::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let b = barrier.clone();
+        let handle = thread::spawn(move || {
+            b.wait();
+        });
+        running.insert(1, handle);
+        // Thread is blocked on barrier, should not be reaped
+        reap_children(&mut running);
+        assert_eq!(running.len(), 1);
+        // Release the thread
+        barrier.wait();
+        thread::sleep(Duration::from_millis(50));
+        reap_children(&mut running);
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn reap_children_multiple_finished() {
+        let mut running = HashMap::new();
+        for i in 0..5 {
+            running.insert(i, thread::spawn(|| {}));
+        }
+        thread::sleep(Duration::from_millis(50));
+        reap_children(&mut running);
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn wait_all_children_multiple_threads() {
+        let mut running = HashMap::new();
+        for i in 0..5 {
+            let ms = i * 10;
+            running.insert(
+                i,
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(ms));
+                }),
+            );
+        }
+        wait_all_children(&mut running);
+        assert!(running.is_empty());
+    }
+
+    #[test]
+    fn reap_children_mixed_finished_and_running() {
+        let mut running = HashMap::new();
+        // Two threads that finish immediately
+        running.insert(1, thread::spawn(|| {}));
+        running.insert(2, thread::spawn(|| {}));
+        // One thread that blocks
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let b = barrier.clone();
+        running.insert(
+            3,
+            thread::spawn(move || {
+                b.wait();
+            }),
+        );
+        thread::sleep(Duration::from_millis(50));
+        reap_children(&mut running);
+        // Only the blocked thread should remain
+        assert_eq!(running.len(), 1);
+        assert!(running.contains_key(&3));
+        // Release and clean up
+        barrier.wait();
+        thread::sleep(Duration::from_millis(50));
+        reap_children(&mut running);
         assert!(running.is_empty());
     }
 }

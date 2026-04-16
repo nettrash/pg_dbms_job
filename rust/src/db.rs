@@ -198,4 +198,47 @@ mod tests {
         assert!(conn.contains("host="));
         assert!(conn.contains("dbname="));
     }
+
+    #[test]
+    fn build_conn_str_special_chars_in_password() {
+        let dbinfo = DbInfo {
+            host: "localhost".to_string(),
+            database: "db".to_string(),
+            user: "user".to_string(),
+            passwd: "p@ss w0rd=!".to_string(),
+            port: 5432,
+        };
+        let conn = build_conn_str(&dbinfo);
+        assert!(conn.contains("password=p@ss w0rd=!"));
+    }
+
+    #[test]
+    fn build_conn_str_field_order() {
+        let dbinfo = DbInfo {
+            host: "h".to_string(),
+            database: "d".to_string(),
+            user: "u".to_string(),
+            passwd: "p".to_string(),
+            port: 1234,
+        };
+        let conn = build_conn_str(&dbinfo);
+        let host_pos = conn.find("host=").unwrap();
+        let port_pos = conn.find("port=").unwrap();
+        let user_pos = conn.find("user=").unwrap();
+        let pass_pos = conn.find("password=").unwrap();
+        let db_pos = conn.find("dbname=").unwrap();
+        // host comes first, then port, user, password, dbname
+        assert!(host_pos < port_pos);
+        assert!(port_pos < user_pos);
+        assert!(user_pos < pass_pos);
+        assert!(pass_pos < db_pos);
+    }
+
+    #[test]
+    fn connect_error_display_impl() {
+        let err = ConnectError::Other("test error".to_string());
+        // Verify Display impl works via to_string
+        let s = format!("{err}");
+        assert_eq!(s, "test error");
+    }
 }

@@ -1,6 +1,7 @@
 //! Job discovery and execution logic.
 
 use crate::db::{JobPool, get_job_connection, reset_job_connection};
+use crate::dlog;
 use crate::logging::dprint;
 use crate::model::{Config, Job, JobKind};
 use chrono::Local;
@@ -33,14 +34,15 @@ pub fn get_scheduled_jobs(
             }
         }
         Err(err) => {
-            dprint(config, "ERROR", &format!("can't execute statement, {err}"));
+            dlog!(config, "ERROR", "can't execute statement, {err}");
             *config_invalidated = true;
         }
     }
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("Found {} scheduled jobs to run", jobs.len()),
+        "Found {} scheduled jobs to run",
+        jobs.len()
     );
     jobs
 }
@@ -78,20 +80,21 @@ pub fn get_async_jobs(client: &mut Client, config: &Config) -> HashMap<i64, Job>
         dprint(config, "ERROR", "can't execute statement");
     }
 
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("Found {} asynchronous jobs to run", jobs.len()),
+        "Found {} asynchronous jobs to run",
+        jobs.len()
     );
     jobs
 }
 
 /// Remove a job from the async queue (or fallback to scheduled).
 pub fn delete_job(client: &mut Client, config: &Config, jobid: i64) {
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("Deleting asynchronous job {jobid} from queue"),
+        "Deleting asynchronous job {jobid} from queue"
     );
     let row = client
         .query_opt(
@@ -136,38 +139,31 @@ pub fn spawn_job(
 /// Execute an asynchronous job in a child process.
 fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    dprint(config, "LOG", &format!("executing async job {}", job.job));
+    dlog!(config, "LOG", "executing async job {}", job.job);
 
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("connecting to database for job {}", job.job),
+        "connecting to database for job {}",
+        job.job
     );
 
     let app_name = format!("pg_dbms_job:async:{}", job.job);
     let mut client = match get_job_connection(pool, &app_name) {
         Ok(c) => c,
         Err(err) => {
-            dprint(config, "ERROR", &err.to_string());
+            dlog!(config, "ERROR", "{}", err);
             return;
         }
     };
 
-    dprint(
-        config,
-        "DEBUG",
-        &format!("connected to database for job {}", job.job),
-    );
+    dlog!(config, "DEBUG", "connected to database for job {}", job.job);
 
     if let Some(log_user) = &job.log_user {
         let quoted = quote_ident(log_user);
-        dprint(config, "DEBUG", &format!("SET ROLE {quoted}"));
+        dlog!(config, "DEBUG", "SET ROLE {quoted}");
         if let Err(err) = client.batch_execute(&format!("SET ROLE {quoted}")) {
-            dprint(
-                config,
-                "ERROR",
-                &format!("can not change role, reason: {err}"),
-            );
+            dlog!(config, "ERROR", "can not change role, reason: {err}");
             return;
         }
     } else {
@@ -176,25 +172,21 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
 
     dprint(config, "DEBUG", "BEGIN");
     if let Err(err) = client.batch_execute("BEGIN") {
-        dprint(
+        dlog!(
             config,
             "ERROR",
-            &format!("can not start a transaction, reason: {err}"),
+            "can not start a transaction, reason: {err}"
         );
         return;
     }
 
     if let Some(schema_user) = &job.schema_user {
-        dprint(
-            config,
-            "DEBUG",
-            &format!("SET LOCAL search_path TO {schema_user}"),
-        );
+        dlog!(config, "DEBUG", "SET LOCAL search_path TO {schema_user}");
         if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
-            dprint(
+            dlog!(
                 config,
                 "ERROR",
-                &format!("can not change the search_path, reason: {err}"),
+                "can not change the search_path, reason: {err}"
             );
             return;
         }
@@ -218,27 +210,29 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
         err_text = err.to_string();
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
         status_text = "ERROR".to_string();
-        dprint(
+        dlog!(
             config,
             "ERROR",
-            &format!("job {} failure, reason: {}", job.job, err_text),
+            "job {} failure, reason: {}",
+            job.job,
+            err_text
         );
         dprint(config, "DEBUG", "ROLLBACK");
         if let Err(err) = client.batch_execute("ROLLBACK") {
-            dprint(
+            dlog!(
                 config,
                 "ERROR",
-                &format!("can not rollback a transaction, reason: {err}"),
+                "can not rollback a transaction, reason: {err}"
             );
         }
     } else {
         dprint(config, "DEBUG", "COMMIT");
 
         if let Err(err) = client.batch_execute("COMMIT") {
-            dprint(
+            dlog!(
                 config,
                 "ERROR",
-                &format!("can not commit a transaction, reason: {err}"),
+                "can not commit a transaction, reason: {err}"
             );
         }
     }
@@ -256,64 +250,53 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
         err_text: &err_text,
         sqlstate: &sqlstate,
     };
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("storing job execution details: {:?}", details),
+        "storing job execution details: {:?}",
+        details
     );
     let _ = store_job_execution_details(&mut client, details);
 
     reset_job_connection(&mut client);
 
-    dprint(
+    dlog!(
         config,
         "LOG",
-        &format!(
-            "finished executing async job {} in {} seconds",
-            job.job, duration_secs
-        ),
+        "finished executing async job {} in {} seconds",
+        job.job,
+        duration_secs
     );
 }
 
 /// Execute a scheduled job in a child process.
 fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    dprint(
-        config,
-        "LOG",
-        &format!("executing scheduled job {}", job.job),
-    );
+    dlog!(config, "LOG", "executing scheduled job {}", job.job);
 
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("connecting to database for job {}", job.job),
+        "connecting to database for job {}",
+        job.job
     );
 
     let app_name = format!("pg_dbms_job:scheduled:{}", job.job);
     let mut client = match get_job_connection(pool, &app_name) {
         Ok(c) => c,
         Err(err) => {
-            dprint(config, "ERROR", &err.to_string());
+            dlog!(config, "ERROR", "{}", err);
             return;
         }
     };
 
-    dprint(
-        config,
-        "DEBUG",
-        &format!("connected to database for job {}", job.job),
-    );
+    dlog!(config, "DEBUG", "connected to database for job {}", job.job);
 
     if let Some(log_user) = &job.log_user {
         let quoted = quote_ident(log_user);
-        dprint(config, "DEBUG", &format!("SET ROLE {quoted}"));
+        dlog!(config, "DEBUG", "SET ROLE {quoted}");
         if let Err(err) = client.batch_execute(&format!("SET ROLE {quoted}")) {
-            dprint(
-                config,
-                "ERROR",
-                &format!("can not change role, reason: {err}"),
-            );
+            dlog!(config, "ERROR", "can not change role, reason: {err}");
             return;
         }
     } else {
@@ -321,25 +304,21 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     }
 
     if let Err(err) = client.batch_execute("BEGIN") {
-        dprint(
+        dlog!(
             config,
             "ERROR",
-            &format!("can not start a transaction, reason: {err}"),
+            "can not start a transaction, reason: {err}"
         );
         return;
     }
 
     if let Some(schema_user) = &job.schema_user {
-        dprint(
-            config,
-            "DEBUG",
-            &format!("SET LOCAL search_path TO {schema_user}"),
-        );
+        dlog!(config, "DEBUG", "SET LOCAL search_path TO {schema_user}");
         if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
-            dprint(
+            dlog!(
                 config,
                 "ERROR",
-                &format!("can not change the search_path, reason: {err}"),
+                "can not change the search_path, reason: {err}"
             );
             return;
         }
@@ -363,17 +342,19 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
         err_text = err.to_string();
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
         status_text = "ERROR".to_string();
-        dprint(
+        dlog!(
             config,
             "ERROR",
-            &format!("job {} failure, reason: {}", job.job, err_text),
+            "job {} failure, reason: {}",
+            job.job,
+            err_text
         );
         dprint(config, "DEBUG", "ROLLBACK");
         if let Err(err) = client.batch_execute("ROLLBACK") {
-            dprint(
+            dlog!(
                 config,
                 "ERROR",
-                &format!("can not rollback a transaction, reason: {err}"),
+                "can not rollback a transaction, reason: {err}"
             );
         } else {
             let _ = client.execute(
@@ -384,10 +365,10 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     } else {
         dprint(config, "DEBUG", "COMMIT");
         if let Err(err) = client.batch_execute("COMMIT") {
-            dprint(
+            dlog!(
                 config,
                 "ERROR",
-                &format!("can not commit a transaction, reason: {err}"),
+                "can not commit a transaction, reason: {err}"
             );
         }
     }
@@ -407,22 +388,22 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
         err_text: &err_text,
         sqlstate: &sqlstate,
     };
-    dprint(
+    dlog!(
         config,
         "DEBUG",
-        &format!("storing job execution details: {:?}", details),
+        "storing job execution details: {:?}",
+        details
     );
     let _ = store_job_execution_details(&mut client, details);
 
     reset_job_connection(&mut client);
 
-    dprint(
+    dlog!(
         config,
         "LOG",
-        &format!(
-            "finished executing scheduled job {} in {} seconds",
-            job.job, duration_secs
-        ),
+        "finished executing scheduled job {} in {} seconds",
+        job.job,
+        duration_secs
     );
 }
 
@@ -608,5 +589,52 @@ mod tests {
         // The correct form does not
         let good_stmt = format!("SET LOCAL search_path TO {schema_user}");
         assert!(!good_stmt.contains('"'));
+    }
+
+    #[test]
+    fn build_do_block_empty_what() {
+        let block = build_do_block(1, "");
+        assert!(block.contains("BEGIN\n\t\nEND;"));
+    }
+
+    #[test]
+    fn build_do_block_multiline_what() {
+        let what = "RAISE NOTICE 'line1';\nRAISE NOTICE 'line2';";
+        let block = build_do_block(7, what);
+        assert!(block.contains(what));
+    }
+
+    #[test]
+    fn build_do_block_special_characters() {
+        let what = "RAISE NOTICE 'it''s a $dollar$ test';";
+        let block = build_do_block(99, what);
+        assert!(block.contains(what));
+        // The outer delimiters should not be broken
+        assert!(block.starts_with("DO $pg_dbms_job$"));
+        assert!(block.ends_with("$pg_dbms_job$;"));
+    }
+
+    #[test]
+    fn build_do_block_large_jobid() {
+        let block = build_do_block(i64::MAX, "NULL;");
+        assert!(block.contains(&format!("job bigint := {}", i64::MAX)));
+    }
+
+    #[test]
+    fn quote_ident_unicode() {
+        let result = quote_ident("ñoño");
+        assert_eq!(result, "\"ñoño\"");
+    }
+
+    #[test]
+    fn quote_ident_backslash() {
+        let result = quote_ident("a\\b");
+        assert_eq!(result, "\"a\\b\"");
+    }
+
+    #[test]
+    fn quote_ident_newline() {
+        let result = quote_ident("a\nb");
+        assert_eq!(result, "\"a\nb\"");
     }
 }

@@ -1,5 +1,6 @@
 //! Configuration file parsing and application.
 
+use crate::dlog;
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo};
 use crate::util::die;
@@ -16,10 +17,10 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 "FATAL: can not find the configuration file {config_file}"
             ));
         } else {
-            dprint(
+            dlog!(
                 config,
                 "ERROR",
-                &format!("can not find the configuration file {config_file}"),
+                "can not find the configuration file {config_file}"
             );
             return;
         }
@@ -33,13 +34,11 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
             && config.logfile != val
         {
             config.logfile = val;
-            dprint(
+            dlog!(
                 config,
                 "LOG",
-                &format!(
-                    "Setting logfile from configuration file to {}",
-                    config.logfile
-                ),
+                "Setting logfile from configuration file to {}",
+                config.logfile
             );
         }
     }
@@ -51,13 +50,11 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 "pidfile" => {
                     if config.pidfile != val {
                         config.pidfile = val;
-                        dprint(
+                        dlog!(
                             config,
                             "LOG",
-                            &format!(
-                                "Setting pidfile from configuration file to {}",
-                                config.pidfile
-                            ),
+                            "Setting pidfile from configuration file to {}",
+                            config.pidfile
                         );
                     }
                 }
@@ -65,13 +62,11 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     let debug_val = val.parse::<i32>().unwrap_or(0) != 0;
                     if config.debug != debug_val {
                         config.debug = debug_val;
-                        dprint(
+                        dlog!(
                             config,
                             "LOG",
-                            &format!(
-                                "Setting debug from configuration file to {}",
-                                config.debug as i32
-                            ),
+                            "Setting debug from configuration file to {}",
+                            config.debug as i32
                         );
                     }
                 }
@@ -80,22 +75,19 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                         // Time intervals must be positive and finite
                         if v > 0.0 && v.is_finite() {
                             config.job_queue_interval = v;
-                            dprint(
+                            dlog!(
                                 config,
                                 "LOG",
-                                &format!(
-                                    "Setting job_queue_interval from configuration file to {}",
-                                    config.job_queue_interval
-                                ),
+                                "Setting job_queue_interval from configuration file to {}",
+                                config.job_queue_interval
                             );
                         } else {
-                            dprint(
+                            dlog!(
                                 config,
                                 "ERROR",
-                                &format!(
-                                    "Invalid job_queue_interval value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                    val, config.job_queue_interval
-                                ),
+                                "Invalid job_queue_interval value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
+                                val,
+                                config.job_queue_interval
                             );
                         }
                     }
@@ -106,22 +98,19 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                         if v > 0 {
                             config.job_queue_processes =
                                 v.try_into().unwrap_or(config.job_queue_processes);
-                            dprint(
+                            dlog!(
                                 config,
                                 "LOG",
-                                &format!(
-                                    "Setting job_queue_processes from configuration file to {}",
-                                    config.job_queue_processes
-                                ),
+                                "Setting job_queue_processes from configuration file to {}",
+                                config.job_queue_processes
                             );
                         } else {
-                            dprint(
+                            dlog!(
                                 config,
                                 "ERROR",
-                                &format!(
-                                    "Invalid job_queue_processes value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
-                                    val, config.job_queue_processes
-                                ),
+                                "Invalid job_queue_processes value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                val,
+                                config.job_queue_processes
                             );
                         }
                     }
@@ -130,22 +119,19 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     if let Ok(v) = val.parse::<f64>() {
                         if v > 0.0 && v.is_finite() {
                             config.nap_time = v;
-                            dprint(
+                            dlog!(
                                 config,
                                 "LOG",
-                                &format!(
-                                    "Setting nap_time from configuration file to {}",
-                                    config.nap_time
-                                ),
+                                "Setting nap_time from configuration file to {}",
+                                config.nap_time
                             );
                         } else {
-                            dprint(
+                            dlog!(
                                 config,
                                 "ERROR",
-                                &format!(
-                                    "Invalid nap_time value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                    val, config.nap_time
-                                ),
+                                "Invalid nap_time value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
+                                val,
+                                config.nap_time
                             );
                         }
                     }
@@ -154,22 +140,19 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     if let Ok(v) = val.parse::<f64>() {
                         if v > 0.0 && v.is_finite() {
                             config.startup_delay = v;
-                            dprint(
+                            dlog!(
                                 config,
                                 "LOG",
-                                &format!(
-                                    "Setting startup_delay from configuration file to {}",
-                                    config.startup_delay
-                                ),
+                                "Setting startup_delay from configuration file to {}",
+                                config.startup_delay
                             );
                         } else {
-                            dprint(
+                            dlog!(
                                 config,
                                 "ERROR",
-                                &format!(
-                                    "Invalid startup_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                    val, config.startup_delay
-                                ),
+                                "Invalid startup_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
+                                val,
+                                config.startup_delay
                             );
                         }
                     }
@@ -178,51 +161,48 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     if let Ok(v) = val.parse::<f64>() {
                         if v > 0.0 && v.is_finite() {
                             config.error_delay = v;
-                            dprint(
+                            dlog!(
                                 config,
                                 "LOG",
-                                &format!(
-                                    "Setting error_delay from configuration file to {}",
-                                    config.error_delay
-                                ),
+                                "Setting error_delay from configuration file to {}",
+                                config.error_delay
                             );
                         } else {
-                            dprint(
+                            dlog!(
                                 config,
                                 "ERROR",
-                                &format!(
-                                    "Invalid error_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                    val, config.error_delay
-                                ),
+                                "Invalid error_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
+                                val,
+                                config.error_delay
                             );
                         }
                     }
                 }
                 "host" => {
                     dbinfo.host = val;
-                    dprint(
+                    dlog!(
                         config,
                         "LOG",
-                        &format!("Setting host from configuration file to {}", dbinfo.host),
+                        "Setting host from configuration file to {}",
+                        dbinfo.host
                     );
                 }
                 "database" => {
                     dbinfo.database = val;
-                    dprint(
+                    dlog!(
                         config,
                         "LOG",
-                        &format!(
-                            "Setting database from configuration file to {}",
-                            dbinfo.database
-                        ),
+                        "Setting database from configuration file to {}",
+                        dbinfo.database
                     );
                 }
                 "user" => {
                     dbinfo.user = val;
-                    dprint(
+                    dlog!(
                         config,
                         "LOG",
-                        &format!("Setting user from configuration file to {}", dbinfo.user),
+                        "Setting user from configuration file to {}",
+                        dbinfo.user
                     );
                 }
                 "passwd" => {
@@ -237,19 +217,19 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     if let Ok(v) = val.parse::<u16>() {
                         if v > 0 {
                             dbinfo.port = v;
-                            dprint(
+                            dlog!(
                                 config,
                                 "LOG",
-                                &format!("Setting port from configuration file to {}", dbinfo.port),
+                                "Setting port from configuration file to {}",
+                                dbinfo.port
                             );
                         } else {
-                            dprint(
+                            dlog!(
                                 config,
                                 "ERROR",
-                                &format!(
-                                    "Invalid port value {} in configuration file, must be a positive integer. Ignoring. Actual value remains {}",
-                                    val, dbinfo.port
-                                ),
+                                "Invalid port value {} in configuration file, must be a positive integer. Ignoring. Actual value remains {}",
+                                val,
+                                dbinfo.port
                             );
                         }
                     }
@@ -500,6 +480,219 @@ port=notanumber
         assert_eq!(config.startup_delay, 5.5);
         assert_eq!(config.error_delay, 2.0);
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_config_line_whitespace_around_equals() {
+        let parsed = parse_config_line("  host  =  myhost  ");
+        assert_eq!(parsed, Some(("host".to_string(), "myhost".to_string())));
+    }
+
+    #[test]
+    fn parse_config_line_tab_separated() {
+        let parsed = parse_config_line("\thost\t=\tdb.example.com\t");
+        assert_eq!(
+            parsed,
+            Some(("host".to_string(), "db.example.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_config_line_only_comment_after_equals() {
+        let parsed = parse_config_line("key = #value");
+        // '#' starts a comment—so the value is empty
+        assert_eq!(parsed, Some(("key".to_string(), String::new())));
+    }
+
+    #[test]
+    fn read_config_logfile_applied_first() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_logfile.conf");
+        fs::write(&path, "logfile=/tmp/test_scheduler.log\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(config.logfile, "/tmp/test_scheduler.log");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_zero_values_rejected() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 5.0,
+            job_queue_processes: 10,
+            nap_time: 1.0,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_zero.conf");
+        let content = "job_queue_interval=0\nnap_time=0\nstartup_delay=0\nerror_delay=0\njob_queue_processes=0\n";
+        fs::write(&path, content).expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        // All should remain at original values
+        assert_eq!(config.job_queue_interval, 5.0);
+        assert_eq!(config.job_queue_processes, 10);
+        assert_eq!(config.nap_time, 1.0);
+        assert_eq!(config.startup_delay, 3.0);
+        assert_eq!(config.error_delay, 0.5);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_infinity_rejected() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 5.0,
+            job_queue_processes: 10,
+            nap_time: 1.0,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_inf.conf");
+        let content = "job_queue_interval=inf\nnap_time=inf\nstartup_delay=inf\nerror_delay=inf\n";
+        fs::write(&path, content).expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(config.job_queue_interval, 5.0);
+        assert_eq!(config.nap_time, 1.0);
+        assert_eq!(config.startup_delay, 3.0);
+        assert_eq!(config.error_delay, 0.5);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_unchanged_values_preserved() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 5.0,
+            job_queue_processes: 10,
+            nap_time: 1.0,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        // Set pidfile to same value — should remain unchanged
+        let path = temp_path("pg_dbms_job_noop.conf");
+        fs::write(&path, "pidfile=/tmp/pg_dbms_job.pid\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(config.pidfile, "/tmp/pg_dbms_job.pid");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_debug_toggle() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_dbg.conf");
+        fs::write(&path, "debug=1\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert!(config.debug);
+
+        // Turn off
+        fs::write(&path, "debug=0\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert!(!config.debug);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_dbinfo_all_fields() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_dbinfo.conf");
+        let content =
+            "host=db.example.com\ndatabase=production\nuser=scheduler\npasswd=s3cret\nport=5433\n";
+        fs::write(&path, content).expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(dbinfo.host, "db.example.com");
+        assert_eq!(dbinfo.database, "production");
+        assert_eq!(dbinfo.user, "scheduler");
+        assert_eq!(dbinfo.passwd, "s3cret");
+        assert_eq!(dbinfo.port, 5433);
         let _ = fs::remove_file(path);
     }
 }

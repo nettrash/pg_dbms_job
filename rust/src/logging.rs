@@ -248,6 +248,7 @@ mod tests {
             log_truncate_on_rotation: false,
             job_queue_interval: 5.0,
             job_queue_processes: 1000,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 1.0,
@@ -308,6 +309,7 @@ mod tests {
             log_truncate_on_rotation: false,
             job_queue_interval: 5.0,
             job_queue_processes: 1000,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 1.0,
@@ -393,6 +395,89 @@ mod tests {
         assert!(content.contains("ERROR"));
         assert!(content.contains("macro error msg"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dprint_rotates_when_logfile_path_changes() {
+        let path_a = temp_log_path();
+        let path_b = temp_log_path();
+        let mut cfg = test_config(&path_a, false);
+        dprint(&cfg, "LOG", "first file");
+        flush_logger();
+
+        // Switch to a different log file — next write should land there.
+        cfg.logfile = path_b.to_string_lossy().to_string();
+        dprint(&cfg, "LOG", "second file");
+        flush_logger();
+
+        let content_a = fs::read_to_string(&path_a).expect("read first log");
+        let content_b = fs::read_to_string(&path_b).expect("read second log");
+        assert!(content_a.contains("first file"));
+        assert!(!content_a.contains("second file"));
+        assert!(content_b.contains("second file"));
+        assert!(!content_b.contains("first file"));
+        let _ = fs::remove_file(path_a);
+        let _ = fs::remove_file(path_b);
+    }
+
+    #[test]
+    fn dprint_expands_strftime_tokens_in_logfile() {
+        // A logfile path with a '%' specifier should be expanded through
+        // chrono's formatter so rotation by date works.
+        let dir = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let template = dir.join(format!("pg_dbms_job_rot_{now}_%Y.log"));
+        let cfg = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: template.to_string_lossy().to_string(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 5.0,
+            job_queue_processes: 1000,
+            pool_size: 100,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 1.0,
+        };
+        dprint(&cfg, "LOG", "date formatted");
+        flush_logger();
+
+        // The actual on-disk filename contains the current year, not '%Y'.
+        let year = chrono::Local::now().format("%Y").to_string();
+        let expected = dir.join(format!("pg_dbms_job_rot_{now}_{year}.log"));
+        let content = fs::read_to_string(&expected).expect("read expanded log path");
+        assert!(content.contains("date formatted"));
+        // And the literal path with '%Y' must NOT exist.
+        assert!(!template.exists(), "unexpanded template path was created");
+        let _ = fs::remove_file(expected);
+    }
+
+    #[test]
+    fn dprint_truncates_on_rotation_when_enabled() {
+        let path_a = temp_log_path();
+        let path_b = temp_log_path();
+
+        let mut cfg = test_config(&path_a, false);
+        cfg.log_truncate_on_rotation = true;
+        dprint(&cfg, "LOG", "initial a");
+        flush_logger();
+
+        // Pre-populate path_b so rotation has something to truncate.
+        fs::write(&path_b, "stale content\n").expect("seed old log");
+
+        cfg.logfile = path_b.to_string_lossy().to_string();
+        dprint(&cfg, "LOG", "fresh b");
+        flush_logger();
+
+        let content_b = fs::read_to_string(&path_b).expect("read rotated log");
+        // Stale content must be gone; only the new line should remain.
+        assert!(!content_b.contains("stale content"));
+        assert!(content_b.contains("fresh b"));
+        let _ = fs::remove_file(path_a);
+        let _ = fs::remove_file(path_b);
     }
 
     #[test]

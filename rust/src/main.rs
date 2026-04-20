@@ -91,6 +91,7 @@ fn main() {
 
     dprint(&config, "LOG", "Entering main loop.");
 
+    let mut config = Arc::new(config);
     let mut dbh: Option<Client> = None;
     let mut job_pool: Option<Arc<JobPool>> = None;
     let mut running_workers: HashMap<u64, JoinHandle<()>> = HashMap::new();
@@ -108,10 +109,13 @@ fn main() {
 
         if reload_flag.swap(false, Ordering::Relaxed) {
             dprint(&config, "LOG", "Received reload signal HUP.");
-            let old_pidfile = config.pidfile.clone();
-            read_config(&args.config_file, &mut config, &mut dbinfo, true);
-            if old_pidfile != config.pidfile {
-                if let Err(err) = std::fs::rename(&old_pidfile, &config.pidfile) {
+            let mut cfg = Config::clone(&config);
+            let old_pidfile = cfg.pidfile.clone();
+            read_config(&args.config_file, &mut cfg, &mut dbinfo, true);
+            if old_pidfile != cfg.pidfile {
+                if let Err(err) = std::fs::rename(&old_pidfile, &cfg.pidfile) {
+                    cfg.pidfile = old_pidfile.clone();
+                    config = Arc::new(cfg);
                     dlog!(
                         &config,
                         "ERROR",
@@ -119,8 +123,8 @@ fn main() {
                         old_pidfile,
                         err
                     );
-                    config.pidfile = old_pidfile;
                 } else {
+                    config = Arc::new(cfg);
                     dlog!(
                         &config,
                         "LOG",
@@ -129,6 +133,8 @@ fn main() {
                         config.pidfile
                     );
                 }
+            } else {
+                config = Arc::new(cfg);
             }
             config_invalidated = true;
         }
@@ -172,13 +178,14 @@ fn main() {
         }
 
         if job_pool.is_none() {
-            match create_job_pool(&dbinfo, config.job_queue_processes as u32) {
+            let effective_pool_size = config.pool_size.min(config.job_queue_processes) as u32;
+            match create_job_pool(&dbinfo, effective_pool_size) {
                 Ok(pool) => {
                     dlog!(
                         &config,
                         "LOG",
                         "Connection pool created with max size {}",
-                        config.job_queue_processes
+                        effective_pool_size
                     );
                     job_pool = Some(Arc::new(pool));
                 }
@@ -198,7 +205,7 @@ fn main() {
         if let Some(client) = dbh.as_mut() {
             config_invalidated = false;
             let mut notifications = client.notifications();
-            let mut iter = notifications.iter();
+            let mut iter = notifications.timeout_iter(Duration::from_secs_f64(config.nap_time));
             loop {
                 match iter.next() {
                     Ok(Some(notification)) => {
@@ -255,14 +262,19 @@ fn main() {
 
         if async_count > 0 || startup {
             if let Some(client) = dbh.as_mut() {
-                async_jobs = get_async_jobs(client, &config);
+                get_async_jobs(client, &config, &mut async_jobs);
             }
             previous_async_exec = Instant::now();
         }
 
         if scheduled_count > 0 || startup {
             if let Some(client) = dbh.as_mut() {
-                scheduled_jobs = get_scheduled_jobs(client, &config, &mut config_invalidated);
+                get_scheduled_jobs(
+                    client,
+                    &config,
+                    &mut config_invalidated,
+                    &mut scheduled_jobs,
+                );
             }
             previous_scheduled_exec = Instant::now();
             if config_invalidated {
@@ -320,8 +332,6 @@ fn main() {
         if args.single {
             break;
         }
-
-        thread::sleep(Duration::from_secs_f64(config.nap_time));
     }
 
     wait_all_children(&mut running_workers);
@@ -350,6 +360,7 @@ fn default_config() -> Config {
         log_truncate_on_rotation: false,
         job_queue_interval: 0.1,
         job_queue_processes: 1024,
+        pool_size: 100,
         nap_time: 0.1,
         startup_delay: 3.0,
         error_delay: 0.5,
@@ -411,5 +422,28 @@ mod tests {
         assert!(dbinfo.database.is_empty());
         assert!(dbinfo.user.is_empty());
         assert!(dbinfo.passwd.is_empty());
+    }
+
+    #[test]
+    fn default_config_pool_size() {
+        let config = default_config();
+        assert_eq!(config.pool_size, 100);
+    }
+
+    #[test]
+    fn default_config_pool_size_capped_by_processes() {
+        let config = default_config();
+        // The main loop clamps the pool size to the configured number of
+        // worker threads. Defaults guarantee pool_size <= job_queue_processes.
+        let effective = config.pool_size.min(config.job_queue_processes);
+        assert_eq!(effective, config.pool_size);
+    }
+
+    #[test]
+    fn default_config_delays_positive_and_finite() {
+        let config = default_config();
+        assert!(config.startup_delay > 0.0 && config.startup_delay.is_finite());
+        assert!(config.error_delay > 0.0 && config.error_delay.is_finite());
+        assert!(config.job_queue_interval > 0.0 && config.job_queue_interval.is_finite());
     }
 }

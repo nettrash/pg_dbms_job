@@ -115,6 +115,27 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                         }
                     }
                 }
+                "pool_size" => {
+                    if let Ok(v) = val.parse::<isize>() {
+                        if v > 0 {
+                            config.pool_size = v.try_into().unwrap_or(config.pool_size);
+                            dlog!(
+                                config,
+                                "LOG",
+                                "Setting pool_size from configuration file to {}",
+                                config.pool_size
+                            );
+                        } else {
+                            dlog!(
+                                config,
+                                "ERROR",
+                                "Invalid pool_size value {} in configuration file, must be positive. Ignoring. Actual value remains {}",
+                                val,
+                                config.pool_size
+                            );
+                        }
+                    }
+                }
                 "nap_time" => {
                     if let Ok(v) = val.parse::<f64>() {
                         if v > 0.0 && v.is_finite() {
@@ -332,6 +353,7 @@ mod tests {
             log_truncate_on_rotation: false,
             job_queue_interval: 0.1,
             job_queue_processes: 1024,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -386,6 +408,7 @@ log_truncate_on_rotation=1
             log_truncate_on_rotation: false,
             job_queue_interval: 0.1,
             job_queue_processes: 1024,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -414,6 +437,7 @@ log_truncate_on_rotation=1
             log_truncate_on_rotation: false,
             job_queue_interval: 0.1,
             job_queue_processes: 1024,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -459,6 +483,7 @@ port=notanumber
             log_truncate_on_rotation: false,
             job_queue_interval: 0.1,
             job_queue_processes: 1024,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -514,6 +539,7 @@ port=notanumber
             log_truncate_on_rotation: false,
             job_queue_interval: 0.1,
             job_queue_processes: 1024,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -542,6 +568,7 @@ port=notanumber
             log_truncate_on_rotation: false,
             job_queue_interval: 5.0,
             job_queue_processes: 10,
+            pool_size: 10,
             nap_time: 1.0,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -576,6 +603,7 @@ port=notanumber
             log_truncate_on_rotation: false,
             job_queue_interval: 5.0,
             job_queue_processes: 10,
+            pool_size: 10,
             nap_time: 1.0,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -608,6 +636,7 @@ port=notanumber
             log_truncate_on_rotation: false,
             job_queue_interval: 5.0,
             job_queue_processes: 10,
+            pool_size: 10,
             nap_time: 1.0,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -637,6 +666,7 @@ port=notanumber
             log_truncate_on_rotation: false,
             job_queue_interval: 0.1,
             job_queue_processes: 1024,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
@@ -663,6 +693,66 @@ port=notanumber
     }
 
     #[test]
+    fn read_config_pool_size_valid() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            pool_size: 100,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_pool.conf");
+        fs::write(&path, "pool_size=25\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(config.pool_size, 25);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_pool_size_invalid_rejected() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            pool_size: 100,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_pool_invalid.conf");
+        let content = "pool_size=0\npool_size=-10\npool_size=notanumber\n";
+        fs::write(&path, content).expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        // Zero, negative, and non-numeric values all rejected — stays at default
+        assert_eq!(config.pool_size, 100);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn read_config_dbinfo_all_fields() {
         let mut config = Config {
             debug: false,
@@ -671,6 +761,7 @@ port=notanumber
             log_truncate_on_rotation: false,
             job_queue_interval: 0.1,
             job_queue_processes: 1024,
+            pool_size: 100,
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,

@@ -15,6 +15,8 @@ pub struct Config {
     pub job_queue_interval: f64,
     /// Max number of concurrent jobs.
     pub job_queue_processes: usize,
+    /// Max number of database connections in the pool.
+    pub pool_size: usize,
     /// Sleep time between loops (seconds).
     pub nap_time: f64,
     /// Initial delay before starting the scheduler or when we need to restart it (seconds).
@@ -74,6 +76,7 @@ mod tests {
             log_truncate_on_rotation: true,
             job_queue_interval: 10.0,
             job_queue_processes: 2,
+            pool_size: 2,
             nap_time: 0.5,
             startup_delay: 3.0,
             error_delay: 1.0,
@@ -109,6 +112,7 @@ mod tests {
             log_truncate_on_rotation: false,
             job_queue_interval: 5.0,
             job_queue_processes: 10,
+            pool_size: 10,
             nap_time: 0.1,
             startup_delay: 1.0,
             error_delay: 0.5,

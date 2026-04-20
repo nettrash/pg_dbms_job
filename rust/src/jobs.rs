@@ -13,13 +13,16 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 /// Collect scheduled jobs that are ready to run.
+///
+/// Clears and refills `jobs` in place to reuse the existing allocation.
 pub fn get_scheduled_jobs(
     client: &mut Client,
     config: &Config,
     config_invalidated: &mut bool,
-) -> HashMap<i64, Job> {
+    jobs: &mut HashMap<i64, Job>,
+) {
     dprint(config, "DEBUG", "Get scheduled jobs to run");
-    let mut jobs = HashMap::new();
+    jobs.clear();
     let query = "UPDATE dbms_job.all_scheduled_jobs SET this_date = current_timestamp, next_date = dbms_job.get_next_date(interval), instance = instance+1 WHERE interval IS NOT NULL AND NOT broken AND this_date IS NULL AND next_date <= current_timestamp RETURNING job, what, log_user, schema_user";
     match client.query(query, &[]) {
         Ok(rows) => {
@@ -44,12 +47,13 @@ pub fn get_scheduled_jobs(
         "Found {} scheduled jobs to run",
         jobs.len()
     );
-    jobs
 }
 
 /// Collect asynchronous jobs queued for execution.
-pub fn get_async_jobs(client: &mut Client, config: &Config) -> HashMap<i64, Job> {
-    let mut jobs = HashMap::new();
+///
+/// Clears and refills `jobs` in place to reuse the existing allocation.
+pub fn get_async_jobs(client: &mut Client, config: &Config, jobs: &mut HashMap<i64, Job>) {
+    jobs.clear();
     let query = "UPDATE dbms_job.all_async_jobs SET this_date = current_timestamp WHERE this_date IS NULL RETURNING job, what, log_user, schema_user";
     if let Ok(rows) = client.query(query, &[]) {
         for row in rows {
@@ -86,7 +90,6 @@ pub fn get_async_jobs(client: &mut Client, config: &Config) -> HashMap<i64, Job>
         "Found {} asynchronous jobs to run",
         jobs.len()
     );
-    jobs
 }
 
 /// Remove a job from the async queue (or fallback to scheduled).
@@ -116,7 +119,7 @@ pub fn spawn_job(
     kind: JobKind,
     job: Job,
     pool: &Arc<JobPool>,
-    config: &Config,
+    config: &Arc<Config>,
     running_workers: &mut HashMap<u64, JoinHandle<()>>,
     next_worker_id: &mut u64,
 ) {
@@ -124,7 +127,7 @@ pub fn spawn_job(
     *next_worker_id = next_worker_id.wrapping_add(1);
 
     let pool_clone = Arc::clone(pool);
-    let config_clone = config.clone();
+    let config_clone = Arc::clone(config);
 
     let handle = std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
@@ -183,9 +186,7 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     if let Some(schema_user) = &job.schema_user {
         let quoted_path = quote_search_path(schema_user);
         dlog!(config, "DEBUG", "SET LOCAL search_path TO {quoted_path}");
-        if let Err(err) =
-            client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}"))
-        {
+        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}")) {
             dlog!(
                 config,
                 "ERROR",
@@ -318,9 +319,7 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     if let Some(schema_user) = &job.schema_user {
         let quoted_path = quote_search_path(schema_user);
         dlog!(config, "DEBUG", "SET LOCAL search_path TO {quoted_path}");
-        if let Err(err) =
-            client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}"))
-        {
+        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}")) {
             dlog!(
                 config,
                 "ERROR",
@@ -567,18 +566,12 @@ mod tests {
 
     #[test]
     fn quote_search_path_multiple() {
-        assert_eq!(
-            quote_search_path("myapp, public"),
-            "\"myapp\", \"public\""
-        );
+        assert_eq!(quote_search_path("myapp, public"), "\"myapp\", \"public\"");
     }
 
     #[test]
     fn quote_search_path_trims_whitespace() {
-        assert_eq!(
-            quote_search_path("  foo ,  bar  "),
-            "\"foo\", \"bar\""
-        );
+        assert_eq!(quote_search_path("  foo ,  bar  "), "\"foo\", \"bar\"");
     }
 
     #[test]
@@ -590,10 +583,7 @@ mod tests {
 
     #[test]
     fn quote_search_path_with_embedded_quotes() {
-        assert_eq!(
-            quote_search_path("my\"schema"),
-            "\"my\"\"schema\""
-        );
+        assert_eq!(quote_search_path("my\"schema"), "\"my\"\"schema\"");
     }
 
     #[test]

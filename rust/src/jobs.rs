@@ -181,8 +181,11 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     }
 
     if let Some(schema_user) = &job.schema_user {
-        dlog!(config, "DEBUG", "SET LOCAL search_path TO {schema_user}");
-        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
+        let quoted_path = quote_search_path(schema_user);
+        dlog!(config, "DEBUG", "SET LOCAL search_path TO {quoted_path}");
+        if let Err(err) =
+            client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}"))
+        {
             dlog!(
                 config,
                 "ERROR",
@@ -256,7 +259,7 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
         "storing job execution details: {:?}",
         details
     );
-    let _ = store_job_execution_details(&mut client, details);
+    store_job_execution_details(&mut client, details);
 
     reset_job_connection(&mut client);
 
@@ -313,8 +316,11 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
     }
 
     if let Some(schema_user) = &job.schema_user {
-        dlog!(config, "DEBUG", "SET LOCAL search_path TO {schema_user}");
-        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {schema_user}")) {
+        let quoted_path = quote_search_path(schema_user);
+        dlog!(config, "DEBUG", "SET LOCAL search_path TO {quoted_path}");
+        if let Err(err) =
+            client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}"))
+        {
             dlog!(
                 config,
                 "ERROR",
@@ -371,13 +377,15 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
                 "can not commit a transaction, reason: {err}"
             );
         }
+
+        let duration_secs = t0.elapsed().as_secs() as i64;
+        let _ = client.execute(
+            "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, last_date = current_timestamp, total_time = ($1 || ' seconds')::interval, failures = 0, instance = instance+1 WHERE job = $2",
+            &[&duration_secs.to_string(), &job.job],
+        );
     }
 
     let duration_secs = t0.elapsed().as_secs() as i64;
-    let _ = client.execute(
-        "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, last_date = current_timestamp, total_time = ($1 || ' seconds')::interval, failures = 0, instance = instance+1 WHERE job = $2",
-        &[&duration_secs.to_string(), &job.job],
-    );
 
     let details = JobExecutionDetails {
         owner: job.log_user.as_deref().unwrap_or(""),
@@ -394,7 +402,7 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
         "storing job execution details: {:?}",
         details
     );
-    let _ = store_job_execution_details(&mut client, details);
+    store_job_execution_details(&mut client, details);
 
     reset_job_connection(&mut client);
 
@@ -412,6 +420,14 @@ fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Quote a comma-separated list of schema names for use with SET search_path.
+fn quote_search_path(raw: &str) -> String {
+    raw.split(',')
+        .map(|s| quote_ident(s.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Data captured for job execution history.
 #[derive(Debug)]
 struct JobExecutionDetails<'a> {
@@ -425,10 +441,7 @@ struct JobExecutionDetails<'a> {
 }
 
 /// Store job execution details in the database.
-fn store_job_execution_details(
-    client: &mut Client,
-    details: JobExecutionDetails<'_>,
-) -> Result<(), postgres::Error> {
+fn store_job_execution_details(client: &mut Client, details: JobExecutionDetails<'_>) {
     let query = r#"
     INSERT INTO dbms_job.all_scheduler_job_run_details
         (owner, job_name, status, error, req_start_date, actual_start_date, run_duration, slave_pid, additional_info)
@@ -476,8 +489,6 @@ fn store_job_execution_details(
             }
         }
     };
-
-    Ok(())
 }
 
 /// Build a DO block wrapper for the job body.
@@ -489,7 +500,7 @@ fn build_do_block(jobid: i64, what: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_do_block, quote_ident};
+    use super::{build_do_block, quote_ident, quote_search_path};
 
     #[test]
     fn build_do_block_includes_job_and_code() {
@@ -549,46 +560,40 @@ mod tests {
         assert_eq!(result, "\"admin\"\"; DROP TABLE users; --\"");
     }
 
-    // Tests verifying search_path uses unquoted schema names (not quote_ident).
-    // PostgreSQL SET search_path expects comma-separated, optionally schema-qualified
-    // names WITHOUT identifier quoting.
-
     #[test]
-    fn search_path_format_simple_schema() {
-        let schema_user = "public";
-        let stmt = format!("SET LOCAL search_path TO {schema_user}");
-        assert_eq!(stmt, "SET LOCAL search_path TO public");
-        // Must NOT contain double quotes
-        assert!(!stmt.contains('"'));
+    fn quote_search_path_single() {
+        assert_eq!(quote_search_path("public"), "\"public\"");
     }
 
     #[test]
-    fn search_path_format_custom_schema() {
-        let schema_user = "myapp";
-        let stmt = format!("SET LOCAL search_path TO {schema_user}");
-        assert_eq!(stmt, "SET LOCAL search_path TO myapp");
-        assert!(!stmt.contains('"'));
+    fn quote_search_path_multiple() {
+        assert_eq!(
+            quote_search_path("myapp, public"),
+            "\"myapp\", \"public\""
+        );
     }
 
     #[test]
-    fn search_path_format_multiple_schemas() {
-        // schema_user could contain a comma-separated list
-        let schema_user = "myapp, public";
-        let stmt = format!("SET LOCAL search_path TO {schema_user}");
-        assert_eq!(stmt, "SET LOCAL search_path TO myapp, public");
+    fn quote_search_path_trims_whitespace() {
+        assert_eq!(
+            quote_search_path("  foo ,  bar  "),
+            "\"foo\", \"bar\""
+        );
     }
 
     #[test]
-    fn search_path_quote_ident_would_break() {
-        // Demonstrate that quote_ident wrapping would produce invalid search_path
-        let schema_user = "public";
-        let quoted = quote_ident(schema_user);
-        let bad_stmt = format!("SET LOCAL search_path TO {quoted}");
-        // This contains double-quotes which causes lookup failures
-        assert!(bad_stmt.contains('"'));
-        // The correct form does not
-        let good_stmt = format!("SET LOCAL search_path TO {schema_user}");
-        assert!(!good_stmt.contains('"'));
+    fn quote_search_path_injection_attempt() {
+        let result = quote_search_path("public; DROP TABLE users; --");
+        // The whole thing is treated as one schema name and safely quoted
+        assert_eq!(result, "\"public; DROP TABLE users; --\"");
+    }
+
+    #[test]
+    fn quote_search_path_with_embedded_quotes() {
+        assert_eq!(
+            quote_search_path("my\"schema"),
+            "\"my\"\"schema\""
+        );
     }
 
     #[test]

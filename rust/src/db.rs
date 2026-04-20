@@ -91,8 +91,9 @@ pub fn get_job_connection(
     application_name: &str,
 ) -> Result<PooledJobClient, String> {
     let mut client = pool.get().map_err(|e| e.to_string())?;
+    let sanitized_name = application_name.replace('\'', "''");
     client
-        .batch_execute(&format!("SET application_name TO '{application_name}'"))
+        .batch_execute(&format!("SET application_name TO '{sanitized_name}'"))
         .map_err(|e| e.to_string())?;
     Ok(client)
 }

@@ -11,8 +11,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process;
+use std::sync::Mutex;
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Command sent from any thread to the dedicated log writer.
@@ -30,20 +30,49 @@ enum LogCmd {
     Shutdown(mpsc::Sender<()>),
 }
 
-/// Lazily-initialised sender half of the logging channel.
-/// Wrapped in a [`Mutex`] because [`mpsc::Sender`] is `!Sync`.
-static LOG_SENDER: OnceLock<Mutex<mpsc::Sender<LogCmd>>> = OnceLock::new();
+/// Sender + the pid of the process that spawned the writer thread.
+/// After `fork()` only the calling thread survives in the child, so a sender
+/// inherited across fork points at a dead receiver. We detect this by
+/// comparing `pid` against `process::id()` and respawn when they differ.
+struct LoggerState {
+    pid: u32,
+    tx: mpsc::Sender<LogCmd>,
+}
 
-/// Ensure the logger thread is running and return the sender.
-fn ensure_logger() -> &'static Mutex<mpsc::Sender<LogCmd>> {
-    LOG_SENDER.get_or_init(|| {
+static LOG_STATE: Mutex<Option<LoggerState>> = Mutex::new(None);
+
+/// Obtain a sender valid for the current process, spawning the writer thread
+/// if needed (first call, or first call in a forked child).
+fn with_sender<R>(f: impl FnOnce(&mpsc::Sender<LogCmd>) -> R) -> Option<R> {
+    let mut guard = match LOG_STATE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let my_pid = process::id();
+    let need_spawn = match guard.as_ref() {
+        None => true,
+        Some(state) => state.pid != my_pid,
+    };
+    if need_spawn {
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("logger".into())
             .spawn(move || log_writer_thread(rx))
             .expect("spawn logger thread");
-        Mutex::new(tx)
-    })
+        *guard = Some(LoggerState { pid: my_pid, tx });
+    }
+    guard.as_ref().map(|s| f(&s.tx))
+}
+
+/// Drop any sender inherited from a parent process. Call this in the child
+/// immediately after `fork()` so the next log call spawns a fresh writer
+/// thread owned by the child.
+pub fn reset_logger_after_fork() {
+    let mut guard = match LOG_STATE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = None;
 }
 
 /// Background thread that owns the log file handle and serialises writes.
@@ -155,11 +184,16 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
 
 /// Flush all pending messages and stop the writer thread.
 pub fn shutdown_logger() {
-    if let Some(sender) = LOG_SENDER.get()
-        && let Ok(tx) = sender.lock()
+    let guard = match LOG_STATE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let my_pid = process::id();
+    if let Some(state) = guard.as_ref()
+        && state.pid == my_pid
     {
         let (ack_tx, ack_rx) = mpsc::channel();
-        if tx.send(LogCmd::Shutdown(ack_tx)).is_ok() {
+        if state.tx.send(LogCmd::Shutdown(ack_tx)).is_ok() {
             let _ = ack_rx.recv_timeout(Duration::from_secs(5));
         }
     }
@@ -168,12 +202,10 @@ pub fn shutdown_logger() {
 /// Block until all previously sent log messages have been written and flushed.
 #[cfg(test)]
 pub fn flush_logger() {
-    let sender = ensure_logger();
-    if let Ok(tx) = sender.lock() {
-        let (ack_tx, ack_rx) = mpsc::channel();
-        if tx.send(LogCmd::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv_timeout(Duration::from_secs(5));
-        }
+    let (ack_tx, ack_rx) = mpsc::channel();
+    let sent = with_sender(|tx| tx.send(LogCmd::Flush(ack_tx)).is_ok()).unwrap_or(false);
+    if sent {
+        let _ = ack_rx.recv_timeout(Duration::from_secs(5));
     }
 }
 
@@ -196,14 +228,13 @@ pub fn dprint(config: &Config, level: &str, msg: &str) {
         config.logfile.clone()
     };
 
-    let sender = ensure_logger();
-    if let Ok(tx) = sender.lock() {
+    with_sender(|tx| {
         let _ = tx.send(LogCmd::Line {
             line,
             fname,
             truncate_on_rotation: config.log_truncate_on_rotation,
         });
-    }
+    });
 }
 
 /// Convenience macro that defers `format!` so DEBUG messages skip the

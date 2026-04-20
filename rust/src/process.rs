@@ -2,6 +2,7 @@
 
 use crate::constants::PROGRAM;
 use crate::dlog;
+use crate::logging::reset_logger_after_fork;
 use crate::model::Config;
 use crate::util::die;
 use nix::sys::signal::{Signal, kill};
@@ -22,6 +23,10 @@ pub fn daemonize(config: &Config) {
         Ok(ForkResult::Child) => {}
         Err(err) => die(&format!("FATAL: Couldn't fork: {err}")),
     }
+
+    // The parent's logger thread did not survive fork; discard the stale
+    // sender so the next log call spawns a fresh writer in this child.
+    reset_logger_after_fork();
 
     if let Err(err) = setsid() {
         die(&format!("Can't detach: {err}"));

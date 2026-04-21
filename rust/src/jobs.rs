@@ -420,9 +420,18 @@ fn quote_ident(ident: &str) -> String {
 }
 
 /// Quote a comma-separated list of schema names for use with SET search_path.
+/// Segments already wrapped in double quotes are passed through unchanged so
+/// that reserved placeholders like "$user" keep their special meaning.
 fn quote_search_path(raw: &str) -> String {
     raw.split(',')
-        .map(|s| quote_ident(s.trim()))
+        .map(|s| {
+            let s = s.trim();
+            if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+                s.to_string()
+            } else {
+                quote_ident(s)
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -584,6 +593,24 @@ mod tests {
     #[test]
     fn quote_search_path_with_embedded_quotes() {
         assert_eq!(quote_search_path("my\"schema"), "\"my\"\"schema\"");
+    }
+
+    #[test]
+    fn quote_search_path_preserves_user_placeholder() {
+        // Postgres default: "$user", public — the "$user" token must not be
+        // re-quoted or it stops being substituted with the session user.
+        assert_eq!(
+            quote_search_path("\"$user\", public"),
+            "\"$user\", \"public\""
+        );
+    }
+
+    #[test]
+    fn quote_search_path_preserves_already_quoted_segments() {
+        assert_eq!(
+            quote_search_path("\"MyApp\", public"),
+            "\"MyApp\", \"public\""
+        );
     }
 
     #[test]

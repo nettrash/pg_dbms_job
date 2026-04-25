@@ -16,7 +16,7 @@ use crate::constants::VERSION;
 use crate::db::JobPool;
 use crate::db::{ConnectError, connect_db, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, spawn_job};
-use crate::logging::{dprint, shutdown_logger};
+use crate::logging::{dprint, reopen_logger, shutdown_logger};
 use crate::model::{Config, DbInfo, Job, JobKind};
 use crate::process::{daemonize, reap_children, signal_handling, wait_all_children, write_pidfile};
 use crate::util::die;
@@ -109,6 +109,11 @@ fn main() {
 
         if reload_flag.swap(false, Ordering::Relaxed) {
             dprint(&config, "LOG", "Received reload signal HUP.");
+            // Drop the persistent log file handle so the next write re-opens
+            // the configured path. Without this, logrotate-style rotation
+            // (rename pg_dbms_job.log → pg_dbms_job.log.1, create new log)
+            // leaves us writing to the renamed file via the old inode.
+            reopen_logger();
             let mut cfg = Config::clone(&config);
             let old_pidfile = cfg.pidfile.clone();
             read_config(&args.config_file, &mut cfg, &mut dbinfo, true);

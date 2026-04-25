@@ -26,6 +26,9 @@ enum LogCmd {
     /// Flush all pending writes and send an ack (does not stop the thread).
     #[cfg(test)]
     Flush(mpsc::Sender<()>),
+    /// Drop the persistent file handle so the next write re-opens the path.
+    /// Used after external log rotation (e.g. logrotate + SIGHUP).
+    Reopen,
     /// Request a clean shutdown; the writer flushes and sends an ack.
     Shutdown(mpsc::Sender<()>),
 }
@@ -153,6 +156,12 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
                 LogCmd::Flush(ack) => {
                     flush_acks.push(ack);
                 }
+                LogCmd::Reopen => {
+                    if let Some(ref mut w) = writer {
+                        let _ = w.flush();
+                    }
+                    writer = None;
+                }
                 LogCmd::Shutdown(ack) => {
                     shutdown_ack = Some(ack);
                 }
@@ -180,6 +189,15 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
     if let Some(ref mut w) = writer {
         let _ = w.flush();
     }
+}
+
+/// Drop the persistent log file handle so the next write opens the configured
+/// path fresh. Call this after receiving SIGHUP so logrotate-style rotation
+/// (rename + create) starts writing to the new file instead of the old inode.
+pub fn reopen_logger() {
+    with_sender(|tx| {
+        let _ = tx.send(LogCmd::Reopen);
+    });
 }
 
 /// Flush all pending messages and stop the writer thread.
@@ -258,7 +276,7 @@ macro_rules! dlog {
 
 #[cfg(test)]
 mod tests {
-    use super::{dprint, flush_logger};
+    use super::{dprint, flush_logger, reopen_logger};
     use crate::model::Config;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -509,6 +527,137 @@ mod tests {
         assert!(content_b.contains("fresh b"));
         let _ = fs::remove_file(path_a);
         let _ = fs::remove_file(path_b);
+    }
+
+    #[test]
+    fn reopen_logger_writes_to_new_file_after_external_rename() {
+        // Simulate logrotate: write to path, rename it aside, then reopen.
+        // The next write must land at the original path (a fresh file),
+        // not in the renamed-aside file.
+        let path = temp_log_path();
+        let rotated = {
+            let mut p = path.clone();
+            let name = format!("{}.1", path.file_name().unwrap().to_string_lossy());
+            p.set_file_name(name);
+            p
+        };
+
+        let config = test_config(&path, false);
+        dprint(&config, "LOG", "before rotation");
+        flush_logger();
+
+        // External rotation: rename the active log out of the way.
+        fs::rename(&path, &rotated).expect("rename log aside");
+
+        // Without reopen, the daemon's persistent FD still points at `rotated`.
+        reopen_logger();
+
+        dprint(&config, "LOG", "after rotation");
+        flush_logger();
+
+        let new_content = fs::read_to_string(&path).expect("read new log file");
+        let rotated_content = fs::read_to_string(&rotated).expect("read rotated log");
+        assert!(
+            new_content.contains("after rotation"),
+            "post-rotation line should be in the new file"
+        );
+        assert!(
+            !new_content.contains("before rotation"),
+            "new file must not contain pre-rotation line"
+        );
+        assert!(
+            rotated_content.contains("before rotation"),
+            "rotated file should still contain pre-rotation line"
+        );
+        assert!(
+            !rotated_content.contains("after rotation"),
+            "rotated file must not receive post-rotation lines"
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&rotated);
+    }
+
+    #[test]
+    fn reopen_logger_is_safe_before_any_write() {
+        // Calling reopen before any log line has been emitted (e.g. SIGHUP
+        // arrives during the initial startup window) must not panic and must
+        // not block. The writer thread may not even be spawned yet.
+        reopen_logger();
+        reopen_logger();
+        // A subsequent write still has to land in the configured file.
+        let path = temp_log_path();
+        let cfg = test_config(&path, false);
+        dprint(&cfg, "LOG", "after early reopen");
+        flush_logger();
+        let content = fs::read_to_string(&path).expect("read log");
+        assert!(content.contains("after early reopen"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reopen_logger_flushes_pending_writes() {
+        // A reopen must flush queued data into the *current* file before
+        // dropping the handle — otherwise lines emitted just before SIGHUP
+        // could be silently lost or appear in the wrong file.
+        let path = temp_log_path();
+        let cfg = test_config(&path, false);
+        dprint(&cfg, "LOG", "pre-reopen line");
+        // No flush_logger() here on purpose: rely on Reopen to flush.
+        reopen_logger();
+        // Round-trip a no-op flush so we know the writer thread has drained.
+        flush_logger();
+        let content = fs::read_to_string(&path).expect("read log");
+        assert!(
+            content.contains("pre-reopen line"),
+            "reopen must flush pending data, got: {content:?}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reopen_logger_idempotent_back_to_back() {
+        // Several reopens in a row (e.g. multiple SIGHUPs queued together)
+        // must not corrupt subsequent output.
+        let path = temp_log_path();
+        let cfg = test_config(&path, false);
+        dprint(&cfg, "LOG", "first");
+        flush_logger();
+        reopen_logger();
+        reopen_logger();
+        reopen_logger();
+        dprint(&cfg, "LOG", "second");
+        flush_logger();
+        let content = fs::read_to_string(&path).expect("read log");
+        assert!(content.contains("first"));
+        assert!(content.contains("second"));
+        assert_eq!(
+            content.lines().count(),
+            2,
+            "expected exactly two lines, got {content:?}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reopen_logger_with_empty_logfile_does_not_panic() {
+        // When `logfile` is empty the writer falls back to stderr and never
+        // opens a file. SIGHUP-triggered reopen must still be a no-op.
+        let cfg = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 5.0,
+            job_queue_processes: 1000,
+            pool_size: 100,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 1.0,
+        };
+        dprint(&cfg, "LOG", "stderr fallback before reopen");
+        reopen_logger();
+        dprint(&cfg, "LOG", "stderr fallback after reopen");
+        flush_logger();
     }
 
     #[test]

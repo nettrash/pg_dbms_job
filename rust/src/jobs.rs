@@ -130,19 +130,24 @@ pub fn spawn_job(
     let config_clone = Arc::clone(config);
 
     let handle = std::thread::spawn(move || {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
-            JobKind::Async => subprocess_async(job, &pool_clone, &config_clone),
-            JobKind::Scheduled => subprocess_scheduled(job, &pool_clone, &config_clone),
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            execute_job(kind, job, &pool_clone, &config_clone);
         }));
     });
 
     running_workers.insert(worker_id, handle);
 }
 
-/// Execute an asynchronous job in a child process.
-fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
+/// Execute a job (async or scheduled) on a pooled connection.
+///
+/// The two flavours share virtually all setup, so the kind only influences
+/// three things: the application_name and log labels, the post-commit /
+/// post-rollback bookkeeping for scheduled rows, and whether the row is
+/// removed from the async queue afterwards.
+fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config) {
+    let kind_label = kind.label();
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    dlog!(config, "LOG", "executing async job {}", job.job);
+    dlog!(config, "LOG", "executing {} job {}", kind_label, job.job);
 
     dlog!(
         config,
@@ -151,7 +156,7 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
         job.job
     );
 
-    let app_name = format!("pg_dbms_job:async:{}", job.job);
+    let app_name = format!("pg_dbms_job:{}:{}", kind_label, job.job);
     let mut client = match get_job_connection(pool, &app_name) {
         Ok(c) => c,
         Err(err) => {
@@ -210,7 +215,10 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
     let code = build_do_block(job.job, &job.what);
     dprint(config, "DEBUG", "code to execute:");
     dprint(config, "DEBUG", &code);
-    if let Err(err) = client.batch_execute(&code) {
+
+    let exec_result = client.batch_execute(&code);
+
+    if let Err(err) = exec_result {
         err_text = err.to_string();
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
         status_text = "ERROR".to_string();
@@ -228,144 +236,23 @@ fn subprocess_async(job: Job, pool: &Arc<JobPool>, config: &Config) {
                 "ERROR",
                 "can not rollback a transaction, reason: {err}"
             );
-        }
-    } else {
-        dprint(config, "DEBUG", "COMMIT");
-
-        if let Err(err) = client.batch_execute("COMMIT") {
-            dlog!(
-                config,
-                "ERROR",
-                "can not commit a transaction, reason: {err}"
-            );
-        }
-    }
-
-    dprint(config, "DEBUG", "delete job");
-    delete_job(&mut client, config, job.job);
-
-    let duration_secs = t0.elapsed().as_secs() as i64;
-    let details = JobExecutionDetails {
-        owner: job.log_user.as_deref().unwrap_or(""),
-        jobid: job.job,
-        start_date: &start_t,
-        duration_secs,
-        status_text: &status_text,
-        err_text: &err_text,
-        sqlstate: &sqlstate,
-    };
-    dlog!(
-        config,
-        "DEBUG",
-        "storing job execution details: {:?}",
-        details
-    );
-    store_job_execution_details(&mut client, details);
-
-    reset_job_connection(&mut client);
-
-    dlog!(
-        config,
-        "LOG",
-        "finished executing async job {} in {} seconds",
-        job.job,
-        duration_secs
-    );
-}
-
-/// Execute a scheduled job in a child process.
-fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
-    let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    dlog!(config, "LOG", "executing scheduled job {}", job.job);
-
-    dlog!(
-        config,
-        "DEBUG",
-        "connecting to database for job {}",
-        job.job
-    );
-
-    let app_name = format!("pg_dbms_job:scheduled:{}", job.job);
-    let mut client = match get_job_connection(pool, &app_name) {
-        Ok(c) => c,
-        Err(err) => {
-            dlog!(config, "ERROR", "{}", err);
-            return;
-        }
-    };
-
-    dlog!(config, "DEBUG", "connected to database for job {}", job.job);
-
-    if let Some(log_user) = &job.log_user {
-        let quoted = quote_ident(log_user);
-        dlog!(config, "DEBUG", "SET ROLE {quoted}");
-        if let Err(err) = client.batch_execute(&format!("SET ROLE {quoted}")) {
-            dlog!(config, "ERROR", "can not change role, reason: {err}");
-            return;
-        }
-    } else {
-        dprint(config, "DEBUG", "log_user is not set, using default role");
-    }
-
-    if let Err(err) = client.batch_execute("BEGIN") {
-        dlog!(
-            config,
-            "ERROR",
-            "can not start a transaction, reason: {err}"
-        );
-        return;
-    }
-
-    if let Some(schema_user) = &job.schema_user {
-        let quoted_path = quote_search_path(schema_user);
-        dlog!(config, "DEBUG", "SET LOCAL search_path TO {quoted_path}");
-        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}")) {
-            dlog!(
-                config,
-                "ERROR",
-                "can not change the search_path, reason: {err}"
-            );
-            return;
-        }
-    } else {
-        dprint(
-            config,
-            "DEBUG",
-            "schema_user is not set, using default search_path",
-        );
-    }
-
-    let mut status_text = String::new();
-    let mut err_text = String::new();
-    let mut sqlstate = String::new();
-
-    let t0 = Instant::now();
-    let code = build_do_block(job.job, &job.what);
-    dprint(config, "DEBUG", "code to execute:");
-    dprint(config, "DEBUG", &code);
-    if let Err(err) = client.batch_execute(&code) {
-        err_text = err.to_string();
-        sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
-        status_text = "ERROR".to_string();
-        dlog!(
-            config,
-            "ERROR",
-            "job {} failure, reason: {}",
-            job.job,
-            err_text
-        );
-        dprint(config, "DEBUG", "ROLLBACK");
-        if let Err(err) = client.batch_execute("ROLLBACK") {
-            dlog!(
-                config,
-                "ERROR",
-                "can not rollback a transaction, reason: {err}"
-            );
-        } else {
-            let _ = client.execute(
+        } else if matches!(kind, JobKind::Scheduled) {
+            // The DO-block failed inside a transaction we own, so the
+            // scheduled row's `this_date` is still set from the dispatch
+            // UPDATE. Clear it and bump `failures` so the row is eligible
+            // for the next attempt.
+            if let Err(err) = client.execute(
                 "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, failures = failures+1 WHERE job = $1",
                 &[&job.job],
-            );
+            ) {
+                dlog!(
+                    config,
+                    "ERROR",
+                    "failed to record failure for scheduled job {}: {}",
+                    job.job,
+                    err
+                );
+            }
         }
     } else {
         dprint(config, "DEBUG", "COMMIT");
@@ -375,17 +262,29 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
                 "ERROR",
                 "can not commit a transaction, reason: {err}"
             );
+        } else if matches!(kind, JobKind::Scheduled) {
+            let duration_secs = t0.elapsed().as_secs() as i64;
+            if let Err(err) = client.execute(
+                "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, last_date = current_timestamp, total_time = ($1 || ' seconds')::interval, failures = 0, instance = instance+1 WHERE job = $2",
+                &[&duration_secs.to_string(), &job.job],
+            ) {
+                dlog!(
+                    config,
+                    "ERROR",
+                    "failed to record success for scheduled job {}: {}",
+                    job.job,
+                    err
+                );
+            }
         }
+    }
 
-        let duration_secs = t0.elapsed().as_secs() as i64;
-        let _ = client.execute(
-            "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, last_date = current_timestamp, total_time = ($1 || ' seconds')::interval, failures = 0, instance = instance+1 WHERE job = $2",
-            &[&duration_secs.to_string(), &job.job],
-        );
+    if matches!(kind, JobKind::Async) {
+        dprint(config, "DEBUG", "delete job");
+        delete_job(&mut client, config, job.job);
     }
 
     let duration_secs = t0.elapsed().as_secs() as i64;
-
     let details = JobExecutionDetails {
         owner: job.log_user.as_deref().unwrap_or(""),
         jobid: job.job,
@@ -401,14 +300,15 @@ fn subprocess_scheduled(job: Job, pool: &Arc<JobPool>, config: &Config) {
         "storing job execution details: {:?}",
         details
     );
-    store_job_execution_details(&mut client, details);
+    store_job_execution_details(&mut client, config, details);
 
     reset_job_connection(&mut client);
 
     dlog!(
         config,
         "LOG",
-        "finished executing scheduled job {} in {} seconds",
+        "finished executing {} job {} in {} seconds",
+        kind_label,
         job.job,
         duration_secs
     );
@@ -449,7 +349,11 @@ struct JobExecutionDetails<'a> {
 }
 
 /// Store job execution details in the database.
-fn store_job_execution_details(client: &mut Client, details: JobExecutionDetails<'_>) {
+fn store_job_execution_details(
+    client: &mut Client,
+    config: &Config,
+    details: JobExecutionDetails<'_>,
+) {
     let query = r#"
     INSERT INTO dbms_job.all_scheduler_job_run_details
         (owner, job_name, status, error, req_start_date, actual_start_date, run_duration, slave_pid, additional_info)
@@ -469,7 +373,7 @@ fn store_job_execution_details(client: &mut Client, details: JobExecutionDetails
         format!("sqlstate={}, {}", details.sqlstate, details.err_text)
     };
 
-    match client.execute(
+    if let Err(err) = client.execute(
         query,
         &[
             &details.owner,
@@ -482,21 +386,27 @@ fn store_job_execution_details(client: &mut Client, details: JobExecutionDetails
             &additional_info,
         ],
     ) {
-        Ok(_) => (),
-        Err(err) => {
-            if let Some(db) = err.as_db_error() {
-                eprintln!(
-                    "failed to store job execution details: code={} message={} detail={:?} hint={:?}",
-                    db.code().code(),
-                    db.message(),
-                    db.detail(),
-                    db.hint()
-                );
-            } else {
-                eprintln!("failed to store job execution details: {err}");
-            }
+        if let Some(db) = err.as_db_error() {
+            dlog!(
+                config,
+                "ERROR",
+                "failed to store job execution details for job {}: code={} message={} detail={:?} hint={:?}",
+                details.jobid,
+                db.code().code(),
+                db.message(),
+                db.detail(),
+                db.hint()
+            );
+        } else {
+            dlog!(
+                config,
+                "ERROR",
+                "failed to store job execution details for job {}: {}",
+                details.jobid,
+                err
+            );
         }
-    };
+    }
 }
 
 /// Build a DO block wrapper for the job body.

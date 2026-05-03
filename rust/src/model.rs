@@ -63,6 +63,16 @@ pub enum JobKind {
     Scheduled,
 }
 
+impl JobKind {
+    /// Short label used in log lines and the application_name PG metadata.
+    pub fn label(self) -> &'static str {
+        match self {
+            JobKind::Async => "async",
+            JobKind::Scheduled => "scheduled",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, DbInfo, Job, JobKind};
@@ -176,5 +186,25 @@ mod tests {
         let scheduled = JobKind::Scheduled;
         assert!(matches!(scheduled, JobKind::Scheduled));
         assert!(!matches!(scheduled, JobKind::Async));
+    }
+
+    #[test]
+    fn jobkind_label_async() {
+        assert_eq!(JobKind::Async.label(), "async");
+    }
+
+    #[test]
+    fn jobkind_label_scheduled() {
+        assert_eq!(JobKind::Scheduled.label(), "scheduled");
+    }
+
+    #[test]
+    fn jobkind_label_is_stable_across_copies() {
+        // The label is used in `application_name` strings emitted to PG and
+        // in log lines: changing it would break existing log-grepping
+        // pipelines, so this test pins the spelling.
+        let kinds = [JobKind::Async, JobKind::Scheduled];
+        let labels: Vec<&str> = kinds.iter().map(|k| k.label()).collect();
+        assert_eq!(labels, vec!["async", "scheduled"]);
     }
 }

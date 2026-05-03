@@ -18,7 +18,9 @@ use crate::db::{ConnectError, connect_db, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, spawn_job};
 use crate::logging::{dprint, reopen_logger, shutdown_logger};
 use crate::model::{Config, DbInfo, Job, JobKind};
-use crate::process::{daemonize, reap_children, signal_handling, wait_all_children, write_pidfile};
+use crate::process::{
+    daemonize, reap_children, release_pidfile, signal_handling, wait_all_children, write_pidfile,
+};
 use crate::util::die;
 use fallible_iterator::FallibleIterator;
 use nix::sys::signal::Signal;
@@ -69,18 +71,13 @@ fn main() {
         return;
     }
 
-    if Path::new(&config.pidfile).exists() {
-        die(&format!(
-            "FATAL: pid file already exists at {}, does another pg_dbms_job process is running?",
-            config.pidfile
-        ));
-    }
-
     if !args.single {
         daemonize(&config);
     }
 
-    write_pidfile(&config.pidfile);
+    if let Err(err) = write_pidfile(&config.pidfile) {
+        die(&format!("FATAL: {err}"));
+    }
 
     let terminate_flag = Arc::new(AtomicBool::new(false));
     let reload_flag = Arc::new(AtomicBool::new(false));
@@ -340,6 +337,7 @@ fn main() {
     }
 
     wait_all_children(&mut running_workers);
+    release_pidfile();
     if Path::new(&config.pidfile).exists()
         && let Err(err) = std::fs::remove_file(&config.pidfile)
     {

@@ -34,6 +34,22 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+  audit:
+    name: Security audit (cargo-audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    # Don't gate the merge on transitive advisories — visibility first.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit
+        run: cargo audit
+
   docker:
     needs: build
     runs-on: ubuntu-latest

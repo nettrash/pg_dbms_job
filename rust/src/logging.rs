@@ -46,6 +46,11 @@ static LOG_STATE: Mutex<Option<LoggerState>> = Mutex::new(None);
 
 /// Obtain a sender valid for the current process, spawning the writer thread
 /// if needed (first call, or first call in a forked child).
+///
+/// Returns `None` when the writer thread cannot be spawned (resource
+/// exhaustion, ulimit, post-fork failure). Callers must treat that case as a
+/// signal to write to stderr directly rather than panicking — losing logs is
+/// recoverable; killing the scheduler is not.
 fn with_sender<R>(f: impl FnOnce(&mpsc::Sender<LogCmd>) -> R) -> Option<R> {
     let mut guard = match LOG_STATE.lock() {
         Ok(g) => g,
@@ -58,11 +63,18 @@ fn with_sender<R>(f: impl FnOnce(&mpsc::Sender<LogCmd>) -> R) -> Option<R> {
     };
     if need_spawn {
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("logger".into())
             .spawn(move || log_writer_thread(rx))
-            .expect("spawn logger thread");
-        *guard = Some(LoggerState { pid: my_pid, tx });
+        {
+            Ok(_) => {
+                *guard = Some(LoggerState { pid: my_pid, tx });
+            }
+            Err(err) => {
+                eprintln!("ERROR: failed to spawn logger thread ({err}); falling back to stderr");
+                return None;
+            }
+        }
     }
     guard.as_ref().map(|s| f(&s.tx))
 }
@@ -82,7 +94,6 @@ pub fn reset_logger_after_fork() {
 fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
     let mut current_fname = String::new();
     let mut writer: Option<BufWriter<std::fs::File>> = None;
-    let mut old_log_name = String::new();
 
     loop {
         // Block until the first message arrives.
@@ -116,13 +127,16 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
                         }
                         writer = None;
 
+                        // Truncate iff this is a real rotation (we had a
+                        // previous filename) and the operator opted in. The
+                        // first time we open a log file is not a rotation,
+                        // so a pre-existing file there is preserved.
                         if truncate_on_rotation
-                            && !old_log_name.is_empty()
+                            && !current_fname.is_empty()
                             && Path::new(&fname).exists()
                         {
                             let _ = fs::remove_file(&fname);
                         }
-                        old_log_name = current_fname.clone();
                         current_fname = fname;
                     }
 
@@ -246,13 +260,20 @@ pub fn dprint(config: &Config, level: &str, msg: &str) {
         config.logfile.clone()
     };
 
-    with_sender(|tx| {
-        let _ = tx.send(LogCmd::Line {
-            line,
+    let dispatched = with_sender(|tx| {
+        tx.send(LogCmd::Line {
+            line: line.clone(),
             fname,
             truncate_on_rotation: config.log_truncate_on_rotation,
-        });
-    });
+        })
+        .is_ok()
+    })
+    .unwrap_or(false);
+    if !dispatched {
+        // Writer thread missing or its channel is closed — make sure the line
+        // still surfaces somewhere instead of silently disappearing.
+        eprint!("{line}");
+    }
 }
 
 /// Convenience macro that defers `format!` so DEBUG messages skip the
@@ -279,14 +300,20 @@ mod tests {
     use super::{dprint, flush_logger, reopen_logger};
     use crate::model::Config;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_log_path() -> std::path::PathBuf {
+        // SystemTime::now().as_nanos() collides ~95% of the time on macOS
+        // for back-to-back calls; pair it with a process-wide counter so
+        // every call really is unique.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("pg_dbms_job_log_{now}.log"))
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("pg_dbms_job_log_{now}_{n}.log"))
     }
 
     fn test_config(path: &std::path::Path, debug: bool) -> Config {

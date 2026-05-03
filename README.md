@@ -135,6 +135,50 @@ gilles     14754  0.0  0.0  39636 17492 ?        Ss   10:15   0:00 pg_dbms_job:m
 $ kill -2 14754
 ```
 
+### Reload semantics (SIGHUP / `-r`)
+
+`SIGHUP` re-reads the configuration file and re-opens the log file (so it
+plays nicely with `logrotate`). The reload only affects **new** activity:
+
+- New polling cycles, newly spawned worker threads, and new database
+  connections pick up the updated config.
+- Workers already running when the signal arrives finish under the
+  configuration they started with — settings are not retro-applied.
+- Database/pool changes (`host`, `port`, `user`, `database`, `pool_size`)
+  cause the main connection and the pool to be recreated on the next loop
+  iteration; in-flight workers keep their existing pooled connection.
+- If `pidfile` is changed, the old file is renamed to the new path.
+
+If a tighter ordering is required (e.g. drain all workers, then reload),
+stop the daemon with `-k` and start it again with the new config.
+
+### Recommended indexes
+
+The scheduler polls the job tables on every notification and on every
+`job_queue_interval`. With many rows, the dispatch UPDATEs become a hot
+path. Add these once per database after `CREATE EXTENSION` if your
+workload exceeds a few hundred jobs:
+
+```sql
+-- async dispatch: WHERE this_date IS NULL
+CREATE INDEX IF NOT EXISTS all_async_jobs_pending_idx
+    ON dbms_job.all_async_jobs (this_date)
+    WHERE this_date IS NULL;
+
+-- scheduled dispatch — interval-based:
+--   WHERE interval IS NOT NULL AND NOT broken AND this_date IS NULL AND next_date <= now()
+CREATE INDEX IF NOT EXISTS all_scheduled_jobs_due_idx
+    ON dbms_job.all_scheduled_jobs (next_date)
+    WHERE interval IS NOT NULL AND NOT broken AND this_date IS NULL;
+
+-- scheduled dispatch — one-shot (interval IS NULL) path:
+CREATE INDEX IF NOT EXISTS all_scheduled_jobs_oneshot_idx
+    ON dbms_job.all_scheduled_jobs (next_date)
+    WHERE interval IS NULL AND this_date IS NULL;
+```
+
+These are partial indexes so they stay small even with a large history.
+
 ## [Configuration](#configuration)
 
 The format of the configuration file is the same as `postgresql.conf`.

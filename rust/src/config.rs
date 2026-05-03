@@ -71,26 +71,9 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     }
                 }
                 "job_queue_interval" => {
-                    if let Ok(v) = val.parse::<f64>() {
-                        // Time intervals must be positive and finite
-                        if v > 0.0 && v.is_finite() {
-                            config.job_queue_interval = v;
-                            dlog!(
-                                config,
-                                "LOG",
-                                "Setting job_queue_interval from configuration file to {}",
-                                config.job_queue_interval
-                            );
-                        } else {
-                            dlog!(
-                                config,
-                                "ERROR",
-                                "Invalid job_queue_interval value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                val,
-                                config.job_queue_interval
-                            );
-                        }
-                    }
+                    apply_positive_float(config, "job_queue_interval", &val, |c| {
+                        &mut c.job_queue_interval
+                    });
                 }
                 "job_queue_processes" => {
                     if let Ok(v) = val.parse::<isize>() {
@@ -137,67 +120,13 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                     }
                 }
                 "nap_time" => {
-                    if let Ok(v) = val.parse::<f64>() {
-                        if v > 0.0 && v.is_finite() {
-                            config.nap_time = v;
-                            dlog!(
-                                config,
-                                "LOG",
-                                "Setting nap_time from configuration file to {}",
-                                config.nap_time
-                            );
-                        } else {
-                            dlog!(
-                                config,
-                                "ERROR",
-                                "Invalid nap_time value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                val,
-                                config.nap_time
-                            );
-                        }
-                    }
+                    apply_positive_float(config, "nap_time", &val, |c| &mut c.nap_time);
                 }
                 "startup_delay" => {
-                    if let Ok(v) = val.parse::<f64>() {
-                        if v > 0.0 && v.is_finite() {
-                            config.startup_delay = v;
-                            dlog!(
-                                config,
-                                "LOG",
-                                "Setting startup_delay from configuration file to {}",
-                                config.startup_delay
-                            );
-                        } else {
-                            dlog!(
-                                config,
-                                "ERROR",
-                                "Invalid startup_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                val,
-                                config.startup_delay
-                            );
-                        }
-                    }
+                    apply_positive_float(config, "startup_delay", &val, |c| &mut c.startup_delay);
                 }
                 "error_delay" => {
-                    if let Ok(v) = val.parse::<f64>() {
-                        if v > 0.0 && v.is_finite() {
-                            config.error_delay = v;
-                            dlog!(
-                                config,
-                                "LOG",
-                                "Setting error_delay from configuration file to {}",
-                                config.error_delay
-                            );
-                        } else {
-                            dlog!(
-                                config,
-                                "ERROR",
-                                "Invalid error_delay value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
-                                val,
-                                config.error_delay
-                            );
-                        }
-                    }
+                    apply_positive_float(config, "error_delay", &val, |c| &mut c.error_delay);
                 }
                 "host" => {
                     dbinfo.host = val;
@@ -264,6 +193,44 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
     }
 }
 
+/// Parse a configuration value as a finite, strictly positive `f64` and store
+/// it via `field`. On invalid input the existing field value is preserved and
+/// an error line is logged; on success a confirmation line is logged.
+///
+/// Pulled out so the four time-interval settings (job_queue_interval,
+/// nap_time, startup_delay, error_delay) share one validation path.
+fn apply_positive_float(
+    config: &mut Config,
+    name: &str,
+    raw: &str,
+    field: impl FnOnce(&mut Config) -> &mut f64,
+) {
+    let parsed = match raw.parse::<f64>() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if parsed > 0.0 && parsed.is_finite() {
+        *field(config) = parsed;
+        dlog!(
+            config,
+            "LOG",
+            "Setting {} from configuration file to {}",
+            name,
+            parsed
+        );
+    } else {
+        let current = *field(config);
+        dlog!(
+            config,
+            "ERROR",
+            "Invalid {} value {} in configuration file, must be positive and finite. Ignoring. Actual value remains {}",
+            name,
+            raw,
+            current
+        );
+    }
+}
+
 /// Parse a single configuration line into `key=value` components.
 fn parse_config_line(line: &str) -> Option<(String, String)> {
     let mut l = line.replace('\r', "");
@@ -285,17 +252,40 @@ fn parse_config_line(line: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_config_line, read_config};
+    use super::{apply_positive_float, parse_config_line, read_config};
     use crate::model::{Config, DbInfo};
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_path(prefix: &str) -> std::path::PathBuf {
+        // SystemTime::now().as_nanos() collides ~95% of the time on macOS
+        // for back-to-back calls; pair it with a process-wide counter so
+        // every call really is unique.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("{prefix}_{now}"))
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("{prefix}_{now}_{n}"))
+    }
+
+    /// Build a Config seeded with sentinel values that make it easy to detect
+    /// which field a test wrote to.
+    fn float_test_config() -> Config {
+        Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 7.0,
+            job_queue_processes: 1024,
+            pool_size: 100,
+            nap_time: 11.0,
+            startup_delay: 13.0,
+            error_delay: 17.0,
+        }
     }
 
     #[test]
@@ -785,5 +775,89 @@ port=notanumber
         assert_eq!(dbinfo.passwd, "s3cret");
         assert_eq!(dbinfo.port, 5433);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_positive_float_accepts_valid() {
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "nap_time", "0.25", |c| &mut c.nap_time);
+        assert_eq!(cfg.nap_time, 0.25);
+        // Other fields are untouched.
+        assert_eq!(cfg.startup_delay, 13.0);
+        assert_eq!(cfg.error_delay, 17.0);
+        assert_eq!(cfg.job_queue_interval, 7.0);
+    }
+
+    #[test]
+    fn apply_positive_float_rejects_zero() {
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "nap_time", "0", |c| &mut c.nap_time);
+        assert_eq!(cfg.nap_time, 11.0, "zero must not overwrite default");
+    }
+
+    #[test]
+    fn apply_positive_float_rejects_negative() {
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "startup_delay", "-1.5", |c| &mut c.startup_delay);
+        assert_eq!(cfg.startup_delay, 13.0);
+    }
+
+    #[test]
+    fn apply_positive_float_rejects_nan() {
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "error_delay", "NaN", |c| &mut c.error_delay);
+        assert_eq!(cfg.error_delay, 17.0);
+    }
+
+    #[test]
+    fn apply_positive_float_rejects_infinity() {
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "job_queue_interval", "inf", |c| {
+            &mut c.job_queue_interval
+        });
+        assert_eq!(cfg.job_queue_interval, 7.0);
+        // Negative infinity is a separate code path through the parser.
+        apply_positive_float(&mut cfg, "job_queue_interval", "-inf", |c| {
+            &mut c.job_queue_interval
+        });
+        assert_eq!(cfg.job_queue_interval, 7.0);
+    }
+
+    #[test]
+    fn apply_positive_float_rejects_unparseable() {
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "nap_time", "not-a-number", |c| &mut c.nap_time);
+        assert_eq!(cfg.nap_time, 11.0);
+        // An empty string is also unparseable.
+        apply_positive_float(&mut cfg, "nap_time", "", |c| &mut c.nap_time);
+        assert_eq!(cfg.nap_time, 11.0);
+    }
+
+    #[test]
+    fn apply_positive_float_accepts_subnormal_positive() {
+        // Tiny positive values are still finite and > 0, so they must pass.
+        // (The scheduler will sleep for a vanishingly small interval — the
+        // policy decision is "any positive finite number"; we don't second
+        // -guess the operator.)
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "nap_time", "1e-300", |c| &mut c.nap_time);
+        assert_eq!(cfg.nap_time, 1e-300);
+    }
+
+    #[test]
+    fn apply_positive_float_independence_across_fields() {
+        // Each call only touches the field selected by its closure — this is
+        // the property the deduplication relies on.
+        let mut cfg = float_test_config();
+        apply_positive_float(&mut cfg, "nap_time", "1.0", |c| &mut c.nap_time);
+        apply_positive_float(&mut cfg, "startup_delay", "2.0", |c| &mut c.startup_delay);
+        apply_positive_float(&mut cfg, "error_delay", "3.0", |c| &mut c.error_delay);
+        apply_positive_float(&mut cfg, "job_queue_interval", "4.0", |c| {
+            &mut c.job_queue_interval
+        });
+        assert_eq!(cfg.nap_time, 1.0);
+        assert_eq!(cfg.startup_delay, 2.0);
+        assert_eq!(cfg.error_delay, 3.0);
+        assert_eq!(cfg.job_queue_interval, 4.0);
     }
 }

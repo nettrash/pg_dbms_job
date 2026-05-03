@@ -1,7 +1,8 @@
 [package]
 name = "pg_dbms_job"
-version = "1.5.11-rust"
+version = "1.5.12-rust"
 edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 chrono = "0.4"

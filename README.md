@@ -152,6 +152,38 @@ plays nicely with `logrotate`). The reload only affects **new** activity:
 If a tighter ordering is required (e.g. drain all workers, then reload),
 stop the daemon with `-k` and start it again with the new config.
 
+#### Log rotation with `logrotate`
+
+The daemon keeps the log file open between writes. The recommended setup
+is the standard `create` mode plus a `postrotate` hook that signals the
+daemon to re-open its log file:
+
+```
+/var/log/pg_dbms_job/pg_dbms_job.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 postgres postgres
+    postrotate
+        kill -HUP "$(cat /run/pg_dbms_job/pg_dbms_job.pid)" 2>/dev/null || true
+    endscript
+}
+```
+
+As a safety net the daemon also notices on its own when the file it has
+open has been renamed aside or removed (the configured path now resolves
+to a different inode) and re-opens it on the next write — so rotation
+still works if the `postrotate` hook is missing, though with a small
+delay. `copytruncate` is also handled (the handle is kept; an `O_APPEND`
+write lands at the new start of the file), but `create` mode is preferred.
+
+Time-based rotation needs no signal at all: put an `strftime()` escape in
+`logfile` (e.g. `logfile=/var/log/pg_dbms_job/pg_dbms_job-%Y%m%d.log`) and
+the daemon switches files automatically when the formatted name changes.
+
 ### Recommended indexes
 
 The scheduler polls the job tables on every notification and on every

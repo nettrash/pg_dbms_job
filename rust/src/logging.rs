@@ -9,6 +9,7 @@ use crate::model::Config;
 use chrono::Local;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process;
 use std::sync::Mutex;
@@ -94,6 +95,17 @@ pub fn reset_logger_after_fork() {
 fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
     let mut current_fname = String::new();
     let mut writer: Option<BufWriter<std::fs::File>> = None;
+    // `(dev, ino)` of the file `writer` currently has open. We use it to
+    // notice external rotation (logrotate's rename+create, or an outright
+    // `rm`) that reached us without a SIGHUP — see the check at the top of
+    // each batch below.
+    let mut open_id: Option<(u64, u64)> = None;
+    // Whether we have ever opened a real log file. Used to tell a genuine
+    // rotation (truncate the destination if asked) from the very first open
+    // or a return from stderr-only mode (leave a pre-existing file alone).
+    // `current_fname` can't carry this: it goes back to "" whenever `logfile`
+    // is unset, so it would mis-classify the next real open as a "first" one.
+    let mut opened_real_logfile = false;
 
     loop {
         // Block until the first message arrives.
@@ -106,6 +118,28 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
         let mut batch = vec![first];
         while let Ok(cmd) = rx.try_recv() {
             batch.push(cmd);
+        }
+
+        // If the file we hold open has been rotated out from under us — the
+        // path now resolves to a different inode (logrotate rename+create) or
+        // no longer exists at all — drop the handle so the first Line below
+        // re-opens the configured path. This is a safety net for setups whose
+        // logrotate config forgets the `postrotate kill -HUP`; the SIGHUP path
+        // (`reopen_logger`) still handles the prompt, intended case. A plain
+        // truncate (`copytruncate`) keeps the same inode, so it is left alone:
+        // our handle is opened `O_APPEND`, so writes still land at byte 0.
+        if let Some((dev, ino)) = open_id {
+            let stale = match fs::metadata(&current_fname) {
+                Ok(m) => m.dev() != dev || m.ino() != ino,
+                Err(_) => true,
+            };
+            if stale {
+                if let Some(ref mut w) = writer {
+                    let _ = w.flush();
+                }
+                writer = None;
+                open_id = None;
+            }
         }
 
         let mut shutdown_ack: Option<mpsc::Sender<()>> = None;
@@ -126,14 +160,13 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
                             let _ = w.flush();
                         }
                         writer = None;
+                        open_id = None;
 
-                        // Truncate iff this is a real rotation (we had a
-                        // previous filename) and the operator opted in. The
-                        // first time we open a log file is not a rotation,
+                        // Truncate iff this is a real rotation (we have opened
+                        // a real log file before) and the operator opted in.
+                        // The first time we open a log file is not a rotation,
                         // so a pre-existing file there is preserved.
-                        if truncate_on_rotation
-                            && !current_fname.is_empty()
-                            && Path::new(&fname).exists()
+                        if truncate_on_rotation && opened_real_logfile && Path::new(&fname).exists()
                         {
                             let _ = fs::remove_file(&fname);
                         }
@@ -153,7 +186,11 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
                             .create(true)
                             .open(&current_fname)
                         {
-                            Ok(f) => writer = Some(BufWriter::new(f)),
+                            Ok(f) => {
+                                opened_real_logfile = true;
+                                open_id = f.metadata().ok().map(|m| (m.dev(), m.ino()));
+                                writer = Some(BufWriter::new(f));
+                            }
                             Err(_) => {
                                 eprintln!("ERROR: can't write to log file {current_fname}");
                                 eprint!("{line}");
@@ -175,6 +212,7 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
                         let _ = w.flush();
                     }
                     writer = None;
+                    open_id = None;
                 }
                 LogCmd::Shutdown(ack) => {
                     shutdown_ack = Some(ack);
@@ -208,6 +246,11 @@ fn log_writer_thread(rx: mpsc::Receiver<LogCmd>) {
 /// Drop the persistent log file handle so the next write opens the configured
 /// path fresh. Call this after receiving SIGHUP so logrotate-style rotation
 /// (rename + create) starts writing to the new file instead of the old inode.
+///
+/// The writer thread also detects rotation on its own (it checks the open
+/// file's inode at the start of every batch), so a missed SIGHUP only delays
+/// the re-open until the next write rather than wedging the daemon on the old
+/// inode forever.
 pub fn reopen_logger() {
     with_sender(|tx| {
         let _ = tx.send(LogCmd::Reopen);
@@ -550,8 +593,11 @@ mod tests {
 
         let content_b = fs::read_to_string(&path_b).expect("read rotated log");
         // Stale content must be gone; only the new line should remain.
-        assert!(!content_b.contains("stale content"));
-        assert!(content_b.contains("fresh b"));
+        assert!(
+            !content_b.contains("stale content"),
+            "content_b={content_b:?}"
+        );
+        assert!(content_b.contains("fresh b"), "content_b={content_b:?}");
         let _ = fs::remove_file(path_a);
         let _ = fs::remove_file(path_b);
     }
@@ -602,6 +648,101 @@ mod tests {
         );
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&rotated);
+    }
+
+    #[test]
+    fn auto_reopens_after_external_rename_without_signal() {
+        // logrotate that forgets the `postrotate kill -HUP`: the active log
+        // is renamed aside (and, here, not even re-created) without any
+        // notification to the daemon. The writer must still detect that its
+        // open file no longer lives at the configured path and re-open it on
+        // the next write — landing in a fresh file, not the renamed-aside one.
+        let path = temp_log_path();
+        let rotated = {
+            let mut p = path.clone();
+            let name = format!("{}.1", path.file_name().unwrap().to_string_lossy());
+            p.set_file_name(name);
+            p
+        };
+
+        let config = test_config(&path, false);
+        dprint(&config, "LOG", "before rotation");
+        flush_logger();
+
+        // External rotation, no SIGHUP, no reopen_logger() call.
+        fs::rename(&path, &rotated).expect("rename log aside");
+
+        dprint(&config, "LOG", "after rotation");
+        flush_logger();
+
+        let new_content = fs::read_to_string(&path).expect("read new log file");
+        let rotated_content = fs::read_to_string(&rotated).expect("read rotated log");
+        assert!(
+            new_content.contains("after rotation"),
+            "post-rotation line should be in the freshly re-opened file"
+        );
+        assert!(
+            !new_content.contains("before rotation"),
+            "new file must not contain the pre-rotation line"
+        );
+        assert!(
+            rotated_content.contains("before rotation"),
+            "rotated file should still contain the pre-rotation line"
+        );
+        assert!(
+            !rotated_content.contains("after rotation"),
+            "rotated file must not receive post-rotation lines"
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&rotated);
+    }
+
+    #[test]
+    fn copytruncate_keeps_writing_to_same_inode() {
+        // logrotate `copytruncate`: the file is copied aside and then
+        // truncated in place — same path, same inode. The daemon must keep
+        // its handle (an O_APPEND fd writes at the new EOF, i.e. byte 0), so
+        // post-truncate lines land in the same file without a sparse hole.
+        let path = temp_log_path();
+        let config = test_config(&path, false);
+        dprint(&config, "LOG", "before truncate");
+        flush_logger();
+
+        // Simulate `copytruncate`: copy aside, then truncate in place.
+        let copied = fs::read(&path).expect("read log");
+        let aside = {
+            let mut p = path.clone();
+            p.set_file_name(format!("{}.1", path.file_name().unwrap().to_string_lossy()));
+            p
+        };
+        fs::write(&aside, &copied).expect("copy aside");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for truncate")
+            .set_len(0)
+            .expect("truncate in place");
+
+        dprint(&config, "LOG", "after truncate");
+        flush_logger();
+
+        let content = fs::read_to_string(&path).expect("read log after truncate");
+        assert!(
+            content.contains("after truncate"),
+            "post-truncate line must be present, got: {content:?}"
+        );
+        assert!(
+            !content.contains("before truncate"),
+            "truncated file should not retain the pre-truncate line"
+        );
+        // No leading NUL padding: the first byte must be the timestamp digit.
+        assert!(
+            content.as_bytes().first().is_some_and(u8::is_ascii_digit),
+            "file starts with unexpected bytes (sparse hole?): {:?}",
+            &content.as_bytes()[..content.len().min(8)]
+        );
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&aside);
     }
 
     #[test]

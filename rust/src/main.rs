@@ -105,12 +105,16 @@ fn main() {
         reap_children(&mut running_workers);
 
         if reload_flag.swap(false, Ordering::Relaxed) {
-            dprint(&config, "LOG", "Received reload signal HUP.");
-            // Drop the persistent log file handle so the next write re-opens
-            // the configured path. Without this, logrotate-style rotation
-            // (rename pg_dbms_job.log → pg_dbms_job.log.1, create new log)
-            // leaves us writing to the renamed file via the old inode.
+            // Drop the persistent log file handle *before* writing anything.
+            // After logrotate-style rotation (rename pg_dbms_job.log →
+            // pg_dbms_job.log.1, create a fresh pg_dbms_job.log) our open fd
+            // still points at the renamed-aside inode, so any line emitted now
+            // — including the "Received reload" line below and whatever
+            // read_config() logs — would land in the old file. Reopening first
+            // makes the next write re-open the configured path, i.e. the new
+            // file, which is also what `lsof` will then show.
             reopen_logger();
+            dprint(&config, "LOG", "Received reload signal HUP.");
             let mut cfg = Config::clone(&config);
             let old_pidfile = cfg.pidfile.clone();
             read_config(&args.config_file, &mut cfg, &mut dbinfo, true);

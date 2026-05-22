@@ -47,16 +47,14 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
     for line in content.lines() {
         if let Some((var, val)) = parse_config_line(line) {
             match var.as_str() {
-                "pidfile" => {
-                    if config.pidfile != val {
-                        config.pidfile = val;
-                        dlog!(
-                            config,
-                            "LOG",
-                            "Setting pidfile from configuration file to {}",
-                            config.pidfile
-                        );
-                    }
+                "pidfile" if config.pidfile != val => {
+                    config.pidfile = val;
+                    dlog!(
+                        config,
+                        "LOG",
+                        "Setting pidfile from configuration file to {}",
+                        config.pidfile
+                    );
                 }
                 "debug" => {
                     let debug_val = val.parse::<i32>().unwrap_or(0) != 0;
@@ -187,6 +185,28 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                 "log_truncate_on_rotation" => {
                     config.log_truncate_on_rotation = val.parse::<i32>().unwrap_or(0) != 0;
                 }
+                "stats_interval" => match val.parse::<u64>() {
+                    Ok(v) => {
+                        if config.stats_interval != v {
+                            config.stats_interval = v;
+                            dlog!(
+                                config,
+                                "LOG",
+                                "Setting stats_interval from configuration file to {}",
+                                config.stats_interval
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        dlog!(
+                            config,
+                            "ERROR",
+                            "Invalid stats_interval value {} in configuration file, must be a non-negative integer. Ignoring. Actual value remains {}",
+                            val,
+                            config.stats_interval
+                        );
+                    }
+                },
                 _ => {}
             }
         }
@@ -285,6 +305,7 @@ mod tests {
             nap_time: 11.0,
             startup_delay: 13.0,
             error_delay: 17.0,
+            stats_interval: 0,
         }
     }
 
@@ -347,6 +368,7 @@ mod tests {
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: "".to_string(),
@@ -402,6 +424,7 @@ log_truncate_on_rotation=1
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -431,6 +454,7 @@ log_truncate_on_rotation=1
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -477,6 +501,7 @@ port=notanumber
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -533,6 +558,7 @@ port=notanumber
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -562,6 +588,7 @@ port=notanumber
             nap_time: 1.0,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -597,6 +624,7 @@ port=notanumber
             nap_time: 1.0,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -630,6 +658,7 @@ port=notanumber
             nap_time: 1.0,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -660,6 +689,7 @@ port=notanumber
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -695,6 +725,7 @@ port=notanumber
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -724,6 +755,7 @@ port=notanumber
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -743,6 +775,74 @@ port=notanumber
     }
 
     #[test]
+    fn read_config_stats_interval_valid() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            pool_size: 100,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+            stats_interval: 0,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        let path = temp_path("pg_dbms_job_stats.conf");
+        fs::write(&path, "stats_interval=60\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(config.stats_interval, 60);
+
+        // Zero is the documented "disabled" sentinel and must be accepted.
+        fs::write(&path, "stats_interval=0\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(config.stats_interval, 0);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_stats_interval_invalid_preserved() {
+        let mut config = Config {
+            debug: false,
+            pidfile: "/tmp/pg_dbms_job.pid".to_string(),
+            logfile: String::new(),
+            log_truncate_on_rotation: false,
+            job_queue_interval: 0.1,
+            job_queue_processes: 1024,
+            pool_size: 100,
+            nap_time: 0.1,
+            startup_delay: 3.0,
+            error_delay: 0.5,
+            stats_interval: 45,
+        };
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+
+        // Negative numbers and non-numeric tokens both fail u64 parsing, so
+        // the previously-applied value (45) must survive.
+        let path = temp_path("pg_dbms_job_stats_bad.conf");
+        fs::write(&path, "stats_interval=-1\nstats_interval=notanumber\n").expect("write");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert_eq!(config.stats_interval, 45);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn read_config_dbinfo_all_fields() {
         let mut config = Config {
             debug: false,
@@ -755,6 +855,7 @@ port=notanumber
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 0.5,
+            stats_interval: 0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),

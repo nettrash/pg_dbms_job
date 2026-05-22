@@ -17,7 +17,7 @@ use crate::db::JobPool;
 use crate::db::{ConnectError, connect_db, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, spawn_job};
 use crate::logging::{dprint, reopen_logger, shutdown_logger};
-use crate::model::{Config, DbInfo, Job, JobKind};
+use crate::model::{Config, DbInfo, Job, JobKind, JobStats};
 use crate::process::{
     daemonize, reap_children, release_pidfile, signal_handling, wait_all_children, write_pidfile,
 };
@@ -97,12 +97,28 @@ fn main() {
     let mut async_jobs: HashMap<i64, Job> = HashMap::new();
     let mut previous_async_exec = Instant::now();
     let mut previous_scheduled_exec = Instant::now();
+    let job_stats = Arc::new(JobStats::default());
+    let mut last_stats_at = Instant::now();
     let mut startup = true;
     let mut config_invalidated = false;
     let mut in_recovery_logged = false;
 
     while !terminate_flag.load(Ordering::Relaxed) {
         reap_children(&mut running_workers);
+
+        if config.stats_interval > 0 && last_stats_at.elapsed().as_secs() >= config.stats_interval {
+            let elapsed = last_stats_at.elapsed().as_secs();
+            let (started, finished) = job_stats.drain();
+            dlog!(
+                &config,
+                "LOG",
+                "stats: jobs started={}, finished={} in last {} seconds",
+                started,
+                finished,
+                elapsed
+            );
+            last_stats_at = Instant::now();
+        }
 
         if reload_flag.swap(false, Ordering::Relaxed) {
             // Drop the persistent log file handle *before* writing anything.
@@ -309,6 +325,7 @@ fn main() {
                 job,
                 job_pool.as_ref().unwrap(),
                 &config,
+                &job_stats,
                 &mut running_workers,
                 &mut next_worker_id,
             );
@@ -330,6 +347,7 @@ fn main() {
                 job,
                 job_pool.as_ref().unwrap(),
                 &config,
+                &job_stats,
                 &mut running_workers,
                 &mut next_worker_id,
             );
@@ -371,6 +389,7 @@ fn default_config() -> Config {
         nap_time: 0.1,
         startup_delay: 3.0,
         error_delay: 0.5,
+        stats_interval: 15,
     }
 }
 

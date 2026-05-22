@@ -371,6 +371,7 @@ mod tests {
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 1.0,
+            stats_interval: 0,
         }
     }
 
@@ -432,6 +433,7 @@ mod tests {
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 1.0,
+            stats_interval: 0,
         };
         // Should print to stderr without crashing
         dprint(&config, "LOG", "stderr fallback");
@@ -560,6 +562,7 @@ mod tests {
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 1.0,
+            stats_interval: 0,
         };
         dprint(&cfg, "LOG", "date formatted");
         flush_logger();
@@ -821,6 +824,7 @@ mod tests {
             nap_time: 0.1,
             startup_delay: 3.0,
             error_delay: 1.0,
+            stats_interval: 0,
         };
         dprint(&cfg, "LOG", "stderr fallback before reopen");
         reopen_logger();

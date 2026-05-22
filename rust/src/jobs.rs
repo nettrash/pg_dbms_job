@@ -3,7 +3,7 @@
 use crate::db::{JobPool, get_job_connection, reset_job_connection};
 use crate::dlog;
 use crate::logging::dprint;
-use crate::model::{Config, Job, JobKind};
+use crate::model::{Config, Job, JobKind, JobStats, JobStatsGuard};
 use chrono::Local;
 use postgres::Client;
 use std::collections::HashMap;
@@ -120,6 +120,7 @@ pub fn spawn_job(
     job: Job,
     pool: &Arc<JobPool>,
     config: &Arc<Config>,
+    stats: &Arc<JobStats>,
     running_workers: &mut HashMap<u64, JoinHandle<()>>,
     next_worker_id: &mut u64,
 ) {
@@ -128,10 +129,11 @@ pub fn spawn_job(
 
     let pool_clone = Arc::clone(pool);
     let config_clone = Arc::clone(config);
+    let stats_clone = Arc::clone(stats);
 
     let handle = std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_job(kind, job, &pool_clone, &config_clone);
+            execute_job(kind, job, &pool_clone, &config_clone, &stats_clone);
         }));
     });
 
@@ -144,10 +146,13 @@ pub fn spawn_job(
 /// three things: the application_name and log labels, the post-commit /
 /// post-rollback bookkeeping for scheduled rows, and whether the row is
 /// removed from the async queue afterwards.
-fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config) {
+fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, stats: &JobStats) {
+    // Bump started now, finished on Drop — survives every early return below
+    // and any panic, so the periodic stats LOG line stays balanced.
+    let _stats_guard = JobStatsGuard::new(stats);
     let kind_label = kind.label();
     let start_t = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    dlog!(config, "LOG", "executing {} job {}", kind_label, job.job);
+    dlog!(config, "DEBUG", "executing {} job {}", kind_label, job.job);
 
     dlog!(
         config,
@@ -306,7 +311,7 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config) {
 
     dlog!(
         config,
-        "LOG",
+        "DEBUG",
         "finished executing {} job {} in {} seconds",
         kind_label,
         job.job,

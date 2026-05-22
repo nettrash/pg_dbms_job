@@ -1,5 +1,7 @@
 //! Data models shared across the scheduler.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 #[derive(Clone)]
 /// Runtime configuration values for the scheduler.
 pub struct Config {
@@ -24,6 +26,52 @@ pub struct Config {
     /// Delay after an error before retrying (seconds).
     /// For example when do we reached queue limit.
     pub error_delay: f64,
+    /// Interval (seconds) between periodic job-statistics LOG lines.
+    /// 0 disables periodic stats logging.
+    pub stats_interval: u64,
+}
+
+/// Cross-thread counters incremented by worker threads.
+///
+/// `started` is bumped when a worker enters `execute_job`; `finished` is bumped
+/// when it leaves (including via early-return error paths and panics, courtesy
+/// of [`JobStatsGuard`]). The main loop reads the counters periodically via
+/// [`JobStats::drain`] and emits them at LOG level.
+#[derive(Default)]
+pub struct JobStats {
+    pub started: AtomicU64,
+    pub finished: AtomicU64,
+}
+
+impl JobStats {
+    /// Atomically read and reset both counters. Returns `(started, finished)`.
+    pub fn drain(&self) -> (u64, u64) {
+        (
+            self.started.swap(0, Ordering::Relaxed),
+            self.finished.swap(0, Ordering::Relaxed),
+        )
+    }
+}
+
+/// RAII guard that bumps `started` on construction and `finished` on drop.
+///
+/// Using Drop means every exit from `execute_job` — clean return, early error
+/// return, or unwind from a panic — is counted as a finished job exactly once.
+pub struct JobStatsGuard<'a> {
+    stats: &'a JobStats,
+}
+
+impl<'a> JobStatsGuard<'a> {
+    pub fn new(stats: &'a JobStats) -> Self {
+        stats.started.fetch_add(1, Ordering::Relaxed);
+        Self { stats }
+    }
+}
+
+impl Drop for JobStatsGuard<'_> {
+    fn drop(&mut self) {
+        self.stats.finished.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -75,7 +123,7 @@ impl JobKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DbInfo, Job, JobKind};
+    use super::{Config, DbInfo, Job, JobKind, JobStats, JobStatsGuard};
 
     #[test]
     fn model_structs_hold_values() {
@@ -90,6 +138,7 @@ mod tests {
             nap_time: 0.5,
             startup_delay: 3.0,
             error_delay: 1.0,
+            stats_interval: 0,
         };
         assert!(config.debug);
         assert_eq!(config.pidfile, "/tmp/test.pid");
@@ -126,6 +175,7 @@ mod tests {
             nap_time: 0.1,
             startup_delay: 1.0,
             error_delay: 0.5,
+            stats_interval: 30,
         };
         let cloned = config.clone();
         assert_eq!(cloned.pidfile, config.pidfile);
@@ -196,6 +246,48 @@ mod tests {
     #[test]
     fn jobkind_label_scheduled() {
         assert_eq!(JobKind::Scheduled.label(), "scheduled");
+    }
+
+    #[test]
+    fn job_stats_default_is_zero_and_drain_resets() {
+        let stats = JobStats::default();
+        assert_eq!(stats.drain(), (0, 0));
+        stats
+            .started
+            .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .finished
+            .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(stats.drain(), (3, 2));
+        // After drain both counters return to zero.
+        assert_eq!(stats.drain(), (0, 0));
+    }
+
+    #[test]
+    fn job_stats_guard_increments_started_and_finished() {
+        let stats = JobStats::default();
+        {
+            let _g = JobStatsGuard::new(&stats);
+            // While the guard is alive, started is bumped but finished isn't yet.
+            assert_eq!(stats.started.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(stats.finished.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
+        // After drop, finished caught up.
+        assert_eq!(stats.drain(), (1, 1));
+    }
+
+    #[test]
+    fn job_stats_guard_counts_panicking_workers() {
+        // The guard's Drop runs during unwinding, so a panicking worker still
+        // contributes to the finished count — important for the LOG output
+        // not to silently undercount.
+        let stats = JobStats::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = JobStatsGuard::new(&stats);
+            panic!("worker exploded");
+        }));
+        assert!(result.is_err());
+        assert_eq!(stats.drain(), (1, 1));
     }
 
     #[test]

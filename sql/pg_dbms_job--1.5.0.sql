@@ -61,10 +61,16 @@ COMMENT ON VIEW dbms_job.all_jobs
     IS 'View registering all jobs to be run asynchronously or scheduled.';
 REVOKE ALL ON dbms_job.all_jobs FROM PUBLIC;
 
--- Create a table to store the result of the job execution
+-- Create a table to store the result of the job execution.
+--
+-- Range-partitioned by log_date (monthly) so the unbounded growth of this
+-- write-only history table is managed by creating/dropping whole partitions
+-- rather than DELETE+VACUUM. log_date is part of the primary key because a
+-- partitioned table's PK must include the partition key. Requires PostgreSQL 11+
+-- (declarative partitioning with a DEFAULT partition).
 CREATE TABLE dbms_job.all_scheduler_job_run_details (
-	log_id bigserial PRIMARY KEY, -- unique identifier of the log entry
-	log_date timestamp with time zone DEFAULT current_timestamp, -- date of the log entry
+	log_id bigserial, -- unique identifier of the log entry
+	log_date timestamp with time zone NOT NULL DEFAULT current_timestamp, -- date of the log entry (partition key)
 	owner name, -- owner of the scheduler job
 	job_name varchar(261), -- name of the scheduler job
 	job_subname varchar(261), -- Subname of the Scheduler job (for a chain step job)
@@ -77,8 +83,9 @@ CREATE TABLE dbms_job.all_scheduler_job_run_details (
 	session_id integer, -- session identifier of the job run
 	slave_pid integer, -- process identifier of the slave on which the job was run
 	cpu_used integer, -- amount of cpu used for the job run
-	additional_info	text -- additional information on the job run, error message, etc.
-);
+	additional_info	text, -- additional information on the job run, error message, etc.
+	PRIMARY KEY (log_id, log_date)
+) PARTITION BY RANGE (log_date);
 COMMENT ON TABLE dbms_job.all_scheduler_job_run_details
     IS 'Table used to store the information about the jobs executed.';
 REVOKE ALL ON dbms_job.all_scheduler_job_run_details FROM PUBLIC;
@@ -86,6 +93,118 @@ REVOKE ALL ON dbms_job.all_scheduler_job_run_details FROM PUBLIC;
 -- The user can only see the job that he has created
 ALTER TABLE dbms_job.all_scheduler_job_run_details ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dbms_job_policy ON dbms_job.all_scheduler_job_run_details USING (owner = current_user);
+
+----
+-- Partition maintenance for all_scheduler_job_run_details
+--
+-- Ensures a monthly partition exists for the current month and the next
+-- `months_ahead` months (so routine inserts never fall through to the DEFAULT
+-- partition), then drops monthly partitions entirely older than
+-- `retention_months`. Safe to call repeatedly; a missed call only leaves rows
+-- in the DEFAULT partition and pauses pruning — it never breaks inserts.
+--
+-- Schedule it (as a privileged role, since it issues CREATE/DROP TABLE), e.g.
+-- once a day via cron, or by submitting it as a recurring dbms_job:
+--   SELECT dbms_job.submit(
+--       'PERFORM dbms_job.maintain_run_details_partitions();',
+--       current_timestamp,
+--       'current_timestamp + interval ''1 day''');
+----
+CREATE OR REPLACE FUNCTION dbms_job.maintain_run_details_partitions(
+    months_ahead integer DEFAULT 1,
+    retention_months integer DEFAULT 3
+) RETURNS void
+    LANGUAGE PLPGSQL
+    AS $$
+DECLARE
+    start_d date;
+    end_d   date;
+    part    text;
+    cutoff  date;
+    r       record;
+BEGIN
+    FOR i IN 0..GREATEST(months_ahead, 0) LOOP
+        start_d := (date_trunc('month', current_date) + make_interval(months => i))::date;
+        end_d   := (start_d + interval '1 month')::date;
+        part    := 'all_scheduler_job_run_details_' || to_char(start_d, 'YYYYMM');
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'dbms_job' AND c.relname = part
+        ) THEN
+            EXECUTE format(
+                'CREATE TABLE dbms_job.%I PARTITION OF dbms_job.all_scheduler_job_run_details '
+                'FOR VALUES FROM (%L) TO (%L)', part, start_d, end_d);
+        END IF;
+    END LOOP;
+
+    IF retention_months IS NOT NULL AND retention_months > 0 THEN
+        cutoff := (date_trunc('month', current_date)
+                   - make_interval(months => retention_months))::date;
+        FOR r IN
+            SELECT c.relname
+            FROM pg_inherits inh
+            JOIN pg_class c ON c.oid = inh.inhrelid
+            JOIN pg_class p ON p.oid = inh.inhparent
+            JOIN pg_namespace n ON n.oid = p.relnamespace
+            WHERE n.nspname = 'dbms_job'
+              AND p.relname = 'all_scheduler_job_run_details'
+              AND c.relname ~ '^all_scheduler_job_run_details_[0-9]{6}$'
+        LOOP
+            IF to_date(right(r.relname, 6), 'YYYYMM') < cutoff THEN
+                EXECUTE format('DROP TABLE IF EXISTS dbms_job.%I', r.relname);
+            END IF;
+        END LOOP;
+    END IF;
+END;
+$$;
+REVOKE ALL ON FUNCTION dbms_job.maintain_run_details_partitions(integer, integer) FROM PUBLIC;
+
+-- Catch-all partition so inserts never fail even if maintenance lapses, plus
+-- the current and next month's partitions to start with.
+CREATE TABLE dbms_job.all_scheduler_job_run_details_default
+    PARTITION OF dbms_job.all_scheduler_job_run_details DEFAULT;
+SELECT dbms_job.maintain_run_details_partitions(1, 3);
+
+----
+-- Indexes supporting the scheduler dispatch scans
+--
+-- The daemon refetches ready jobs on every cycle. Without these partial
+-- indexes both fetches degrade to sequential scans over the whole table,
+-- which dominates dispatch latency once the tables accumulate rows/bloat.
+-- The indexes are partial on `this_date IS NULL` so they only cover the
+-- small set of not-yet-running jobs, matching the WHERE clauses in
+-- jobs.rs::get_async_jobs / get_scheduled_jobs.
+----
+CREATE INDEX IF NOT EXISTS all_async_jobs_pending_idx
+    ON dbms_job.all_async_jobs (job)
+    WHERE this_date IS NULL;
+CREATE INDEX IF NOT EXISTS all_scheduled_jobs_pending_idx
+    ON dbms_job.all_scheduled_jobs (next_date)
+    WHERE this_date IS NULL;
+
+----
+-- Per-table autovacuum tuning for the queue tables
+--
+-- Each dispatch+completion performs an UPDATE per job, so these tables churn
+-- heavily and bloat fast under the default 20% scale factor. Vacuum/analyze
+-- them aggressively (after ~100 dead tuples, no cost-delay throttling) so the
+-- partial indexes above and the dispatch scans stay on a compact heap.
+----
+ALTER TABLE dbms_job.all_async_jobs SET (
+    autovacuum_vacuum_scale_factor = 0.0,
+    autovacuum_vacuum_threshold = 100,
+    autovacuum_analyze_scale_factor = 0.0,
+    autovacuum_analyze_threshold = 100,
+    autovacuum_vacuum_cost_delay = 0
+);
+ALTER TABLE dbms_job.all_scheduled_jobs SET (
+    autovacuum_vacuum_scale_factor = 0.0,
+    autovacuum_vacuum_threshold = 100,
+    autovacuum_analyze_scale_factor = 0.0,
+    autovacuum_analyze_threshold = 100,
+    autovacuum_vacuum_cost_delay = 0
+);
 
 ----
 -- Stored procedures

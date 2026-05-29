@@ -2,7 +2,7 @@
 
 use crate::dlog;
 use crate::logging::dprint;
-use crate::model::{Config, DbInfo};
+use crate::model::{Config, DbInfo, JobRunDetails};
 use crate::util::die;
 use std::fs;
 
@@ -207,6 +207,50 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                         );
                     }
                 },
+                "job_run_details" => match JobRunDetails::parse(&val) {
+                    Some(v) => {
+                        if config.job_run_details != v {
+                            config.job_run_details = v;
+                            dlog!(
+                                config,
+                                "LOG",
+                                "Setting job_run_details from configuration file to {}",
+                                config.job_run_details.as_str()
+                            );
+                        }
+                    }
+                    None => {
+                        dlog!(
+                            config,
+                            "ERROR",
+                            "Invalid job_run_details value {} in configuration file, must be one of all|errors|none. Ignoring. Actual value remains {}",
+                            val,
+                            config.job_run_details.as_str()
+                        );
+                    }
+                },
+                "stale_job_timeout" => match val.parse::<f64>() {
+                    Ok(v) if v.is_finite() && v >= 0.0 => {
+                        if config.stale_job_timeout != v {
+                            config.stale_job_timeout = v;
+                            dlog!(
+                                config,
+                                "LOG",
+                                "Setting stale_job_timeout from configuration file to {}",
+                                config.stale_job_timeout
+                            );
+                        }
+                    }
+                    _ => {
+                        dlog!(
+                            config,
+                            "ERROR",
+                            "Invalid stale_job_timeout value {} in configuration file, must be a non-negative number (0 disables). Ignoring. Actual value remains {}",
+                            val,
+                            config.stale_job_timeout
+                        );
+                    }
+                },
                 _ => {}
             }
         }
@@ -306,6 +350,8 @@ mod tests {
             startup_delay: 13.0,
             error_delay: 17.0,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         }
     }
 
@@ -369,6 +415,8 @@ mod tests {
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: "".to_string(),
@@ -412,6 +460,67 @@ log_truncate_on_rotation=1
     }
 
     #[test]
+    fn read_config_parses_job_run_details_and_stale_job_timeout() {
+        let mut config = float_test_config();
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_reap.conf");
+        fs::write(&path, "job_run_details=errors\nstale_job_timeout=120\n")
+            .expect("write temp config");
+
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+
+        assert_eq!(config.job_run_details, crate::model::JobRunDetails::Errors);
+        assert_eq!(config.stale_job_timeout, 120.0);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_rejects_negative_stale_job_timeout() {
+        let mut config = float_test_config();
+        let original = config.stale_job_timeout;
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_reap_bad.conf");
+        // Negative and non-numeric are rejected; the field keeps its value.
+        fs::write(&path, "stale_job_timeout=-5\n").expect("write temp config");
+
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+
+        assert_eq!(config.stale_job_timeout, original);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_allows_zero_stale_job_timeout_to_disable() {
+        let mut config = float_test_config();
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_reap_zero.conf");
+        fs::write(&path, "stale_job_timeout=0\n").expect("write temp config");
+
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+
+        assert_eq!(config.stale_job_timeout, 0.0);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn read_config_missing_file_nodie() {
         let mut config = Config {
             debug: false,
@@ -425,6 +534,8 @@ log_truncate_on_rotation=1
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -455,6 +566,8 @@ log_truncate_on_rotation=1
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -502,6 +615,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -559,6 +674,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -589,6 +706,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -625,6 +744,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -659,6 +780,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -690,6 +813,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -726,6 +851,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -756,6 +883,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -788,6 +917,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -824,6 +955,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 45,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -856,6 +989,8 @@ port=notanumber
             startup_delay: 3.0,
             error_delay: 0.5,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),

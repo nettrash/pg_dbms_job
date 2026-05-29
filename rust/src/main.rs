@@ -12,12 +12,12 @@ mod util;
 
 use crate::args::{parse_args, usage};
 use crate::config::read_config;
-use crate::constants::VERSION;
+use crate::constants::{REAP_INTERVAL_SECS, VERSION};
 use crate::db::JobPool;
 use crate::db::{ConnectError, connect_db, create_job_pool};
-use crate::jobs::{get_async_jobs, get_scheduled_jobs, spawn_job};
+use crate::jobs::{get_async_jobs, get_scheduled_jobs, reap_stale_jobs, spawn_job};
 use crate::logging::{dprint, reopen_logger, shutdown_logger};
-use crate::model::{Config, DbInfo, Job, JobKind, JobStats};
+use crate::model::{Config, DbInfo, Job, JobKind, JobRunDetails, JobStats};
 use crate::process::{
     daemonize, reap_children, release_pidfile, signal_handling, wait_all_children, write_pidfile,
 };
@@ -97,6 +97,7 @@ fn main() {
     let mut async_jobs: HashMap<i64, Job> = HashMap::new();
     let mut previous_async_exec = Instant::now();
     let mut previous_scheduled_exec = Instant::now();
+    let mut previous_reap = Instant::now();
     let job_stats = Arc::new(JobStats::default());
     let mut last_stats_at = Instant::now();
     let mut startup = true;
@@ -309,6 +310,22 @@ fn main() {
         config_invalidated = false;
         startup = false;
 
+        // Periodically re-queue jobs abandoned by workers that never cleared
+        // their dispatch marker (e.g. a worker that could not obtain a pooled
+        // connection, or a crashed worker/daemon). Without this such rows stay
+        // flagged running forever and silently disappear from the queue. The
+        // check cadence is capped so it is never coarser than the eligibility
+        // age itself.
+        if config.stale_job_timeout > 0.0
+            && previous_reap.elapsed().as_secs_f64()
+                >= REAP_INTERVAL_SECS.min(config.stale_job_timeout)
+        {
+            if let Some(client) = dbh.as_mut() {
+                reap_stale_jobs(client, &config);
+            }
+            previous_reap = Instant::now();
+        }
+
         for (_, job) in scheduled_jobs.drain() {
             while running_workers.len() >= config.job_queue_processes {
                 dlog!(
@@ -390,6 +407,8 @@ fn default_config() -> Config {
         startup_delay: 3.0,
         error_delay: 0.5,
         stats_interval: 15,
+        job_run_details: JobRunDetails::All,
+        stale_job_timeout: 3600.0,
     }
 }
 

@@ -75,6 +75,23 @@ ignored. The Rust scheduler accepts the following keys.
   `LOG: stats: jobs started=<N>, finished=<M> in last <S> seconds`.
   Counters are atomically read-and-reset on each report; panicking
   workers are still counted. Set to `0` to disable.
+- `job_run_details` (`all`/`errors`/`none`, default `all`) — how much
+  history is written to `dbms_job.all_scheduler_job_run_details`, one row
+  per job execution. `all` keeps the original behaviour; `errors` records
+  only failed runs (status = ERROR), keeping diagnostics while avoiding
+  most of the growth; `none` disables recording entirely. The table is
+  never read by the scheduler, so on busy systems it bloats without
+  bound — use `errors` or `none` to keep it in check.
+- `stale_job_timeout` (seconds, float ≥ 0, default `3600`) — age after
+  which a job still flagged running (`this_date` set) but with no live
+  worker backend is treated as abandoned and re-queued. This recovers
+  "zombie" rows left behind when a worker could not obtain a connection,
+  failed during `SET ROLE`/`BEGIN`/`search_path`, panicked, or the daemon
+  crashed — without it such rows vanish from the queue permanently. The
+  reaper checks `pg_stat_activity` for the job's `pg_dbms_job:<kind>:<job>`
+  backend, so a legitimately long-running job is never re-queued while
+  still executing (no double execution); pick a value comfortably above
+  your longest expected job runtime. Set to `0` to disable reaping.
 
 ### Database
 
@@ -122,6 +139,12 @@ startup_delay=3.0
 error_delay=1
 # Period (seconds) for the periodic job-stats LOG line; 0 disables it
 stats_interval=15
+# Job-run history recorded in all_scheduler_job_run_details:
+# all = every run, errors = failures only, none = disabled
+job_run_details=all
+# Re-queue jobs flagged running with no live worker after this many
+# seconds (recovers abandoned "zombie" rows); 0 disables
+stale_job_timeout=3600
 
 #-----------
 #  Database

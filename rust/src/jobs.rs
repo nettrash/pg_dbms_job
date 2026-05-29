@@ -3,7 +3,7 @@
 use crate::db::{JobPool, get_job_connection, reset_job_connection};
 use crate::dlog;
 use crate::logging::dprint;
-use crate::model::{Config, Job, JobKind, JobStats, JobStatsGuard};
+use crate::model::{Config, Job, JobKind, JobRunDetails, JobStats, JobStatsGuard};
 use chrono::Local;
 use postgres::Client;
 use std::collections::HashMap;
@@ -111,6 +111,69 @@ pub fn delete_job(client: &mut Client, config: &Config, jobid: i64) {
             "DELETE FROM dbms_job.all_scheduled_jobs WHERE job = $1",
             &[&jobid],
         );
+    }
+}
+
+/// Re-queue jobs left flagged running by workers that never finished.
+///
+/// A worker that returns before clearing its row — most commonly because it
+/// could not obtain a pooled connection (`get_job_connection`), but also on a
+/// failed `SET ROLE`/`BEGIN`/`search_path`, a panic, or a daemon crash — leaves
+/// `this_date` set. Such rows are invisible to the dispatch scans
+/// (`WHERE this_date IS NULL`) forever, so the job silently never runs again:
+/// a "zombie".
+///
+/// This clears the marker for rows older than `stale_job_timeout`, but only
+/// when no live worker backend is executing the job (checked via the
+/// `pg_dbms_job:<kind>:<job>` `application_name` in `pg_stat_activity`). The
+/// liveness check means a legitimately long-running job is never re-queued
+/// while it is still running, so there is no risk of double execution; the age
+/// threshold keeps the reaper from racing a row that was only just dispatched.
+///
+/// The leaked rows have not executed their body (they fail during setup, before
+/// the DO block), so clearing the marker re-queues them for another attempt.
+/// Scheduled rows additionally bump `failures`, mirroring the normal
+/// failure-path bookkeeping.
+pub fn reap_stale_jobs(client: &mut Client, config: &Config) {
+    let timeout = config.stale_job_timeout;
+    if timeout <= 0.0 {
+        return;
+    }
+
+    match client.execute(
+        "UPDATE dbms_job.all_async_jobs AS j SET this_date = NULL \
+         WHERE j.this_date IS NOT NULL \
+           AND j.this_date < current_timestamp - make_interval(secs => $1) \
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                           WHERE a.application_name = 'pg_dbms_job:async:' || j.job)",
+        &[&timeout],
+    ) {
+        Ok(n) if n > 0 => dlog!(config, "LOG", "reaped {} stale asynchronous job(s)", n),
+        Ok(_) => {}
+        Err(err) => dlog!(
+            config,
+            "ERROR",
+            "failed to reap stale asynchronous jobs: {}",
+            err
+        ),
+    }
+
+    match client.execute(
+        "UPDATE dbms_job.all_scheduled_jobs AS j SET this_date = NULL, failures = failures + 1 \
+         WHERE j.this_date IS NOT NULL \
+           AND j.this_date < current_timestamp - make_interval(secs => $1) \
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
+                           WHERE a.application_name = 'pg_dbms_job:scheduled:' || j.job)",
+        &[&timeout],
+    ) {
+        Ok(n) if n > 0 => dlog!(config, "LOG", "reaped {} stale scheduled job(s)", n),
+        Ok(_) => {}
+        Err(err) => dlog!(
+            config,
+            "ERROR",
+            "failed to reap stale scheduled jobs: {}",
+            err
+        ),
     }
 }
 
@@ -290,22 +353,39 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
     }
 
     let duration_secs = t0.elapsed().as_secs() as i64;
-    let details = JobExecutionDetails {
-        owner: job.log_user.as_deref().unwrap_or(""),
-        jobid: job.job,
-        start_date: &start_t,
-        duration_secs,
-        status_text: &status_text,
-        err_text: &err_text,
-        sqlstate: &sqlstate,
+    // `status_text` is "ERROR" only when the job failed; empty on success.
+    let failed = !status_text.is_empty();
+    let record_details = match config.job_run_details {
+        JobRunDetails::All => true,
+        JobRunDetails::Errors => failed,
+        JobRunDetails::None => false,
     };
-    dlog!(
-        config,
-        "DEBUG",
-        "storing job execution details: {:?}",
-        details
-    );
-    store_job_execution_details(&mut client, config, details);
+    if record_details {
+        let details = JobExecutionDetails {
+            owner: job.log_user.as_deref().unwrap_or(""),
+            jobid: job.job,
+            start_date: &start_t,
+            duration_secs,
+            status_text: &status_text,
+            err_text: &err_text,
+            sqlstate: &sqlstate,
+        };
+        dlog!(
+            config,
+            "DEBUG",
+            "storing job execution details: {:?}",
+            details
+        );
+        store_job_execution_details(&mut client, config, details);
+    } else {
+        dlog!(
+            config,
+            "DEBUG",
+            "skipping job execution details for job {} (job_run_details={})",
+            job.job,
+            config.job_run_details.as_str()
+        );
+    }
 
     reset_job_connection(&mut client);
 

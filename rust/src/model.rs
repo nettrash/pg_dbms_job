@@ -29,6 +29,52 @@ pub struct Config {
     /// Interval (seconds) between periodic job-statistics LOG lines.
     /// 0 disables periodic stats logging.
     pub stats_interval: u64,
+    /// Which job executions are recorded in `all_scheduler_job_run_details`.
+    pub job_run_details: JobRunDetails,
+    /// Age (seconds) after which a job still flagged running (`this_date` set)
+    /// with no live worker backend is treated as abandoned and re-queued by
+    /// the reaper. `0` disables reaping.
+    pub stale_job_timeout: f64,
+}
+
+/// Controls how much job-execution history is written to
+/// `dbms_job.all_scheduler_job_run_details`.
+///
+/// That table grows by one row per executed job and is never read by the
+/// scheduler, so on busy systems it bloats without bound. This setting lets
+/// operators keep full history (the default), keep only failures for
+/// diagnostics, or disable recording entirely.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum JobRunDetails {
+    /// Record every run. This is the historical default behaviour.
+    #[default]
+    All,
+    /// Record only runs that failed (status = ERROR).
+    Errors,
+    /// Never record run details.
+    None,
+}
+
+impl JobRunDetails {
+    /// Parse a configuration value: `all` | `errors` | `none`
+    /// (case-insensitive). Returns `None` for unrecognised input.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "all" => Some(JobRunDetails::All),
+            "errors" | "error" => Some(JobRunDetails::Errors),
+            "none" | "off" => Some(JobRunDetails::None),
+            _ => None,
+        }
+    }
+
+    /// Canonical lowercase name, used in log lines.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobRunDetails::All => "all",
+            JobRunDetails::Errors => "errors",
+            JobRunDetails::None => "none",
+        }
+    }
 }
 
 /// Cross-thread counters incremented by worker threads.
@@ -123,7 +169,46 @@ impl JobKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DbInfo, Job, JobKind, JobStats, JobStatsGuard};
+    use super::{Config, DbInfo, Job, JobKind, JobRunDetails, JobStats, JobStatsGuard};
+
+    #[test]
+    fn job_run_details_default_is_all() {
+        assert_eq!(JobRunDetails::default(), JobRunDetails::All);
+    }
+
+    #[test]
+    fn job_run_details_parse_known_values() {
+        assert_eq!(JobRunDetails::parse("all"), Some(JobRunDetails::All));
+        assert_eq!(JobRunDetails::parse("errors"), Some(JobRunDetails::Errors));
+        assert_eq!(JobRunDetails::parse("error"), Some(JobRunDetails::Errors));
+        assert_eq!(JobRunDetails::parse("none"), Some(JobRunDetails::None));
+        assert_eq!(JobRunDetails::parse("off"), Some(JobRunDetails::None));
+    }
+
+    #[test]
+    fn job_run_details_parse_is_case_and_space_insensitive() {
+        assert_eq!(JobRunDetails::parse("  ALL "), Some(JobRunDetails::All));
+        assert_eq!(JobRunDetails::parse("Errors"), Some(JobRunDetails::Errors));
+        assert_eq!(JobRunDetails::parse("NONE"), Some(JobRunDetails::None));
+    }
+
+    #[test]
+    fn job_run_details_parse_rejects_unknown() {
+        assert_eq!(JobRunDetails::parse(""), None);
+        assert_eq!(JobRunDetails::parse("sometimes"), None);
+        assert_eq!(JobRunDetails::parse("1"), None);
+    }
+
+    #[test]
+    fn job_run_details_as_str_roundtrips_through_parse() {
+        for v in [
+            JobRunDetails::All,
+            JobRunDetails::Errors,
+            JobRunDetails::None,
+        ] {
+            assert_eq!(JobRunDetails::parse(v.as_str()), Some(v));
+        }
+    }
 
     #[test]
     fn model_structs_hold_values() {
@@ -139,6 +224,8 @@ mod tests {
             startup_delay: 3.0,
             error_delay: 1.0,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         assert!(config.debug);
         assert_eq!(config.pidfile, "/tmp/test.pid");
@@ -176,6 +263,8 @@ mod tests {
             startup_delay: 1.0,
             error_delay: 0.5,
             stats_interval: 30,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         let cloned = config.clone();
         assert_eq!(cloned.pidfile, config.pidfile);

@@ -2,6 +2,11 @@
 
 /// Current scheduler version string, sourced from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// How often (seconds) the main loop scans for and clears stale dispatch
+/// markers left by workers that never finished. The eligibility *age* is the
+/// configurable `stale_job_timeout`; this is only the check cadence, capped so
+/// it is never coarser than the timeout itself.
+pub const REAP_INTERVAL_SECS: f64 = 60.0;
 /// Program name used in usage text and messaging, sourced from `Cargo.toml`.
 pub const PROGRAM: &str = env!("CARGO_PKG_NAME");
 

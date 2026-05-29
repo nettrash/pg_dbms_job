@@ -366,12 +366,12 @@ Oracle DBMS_JOB doesn't provide a log history. This feature is available in DBMS
 ```
 CREATE TABLE dbms_job.all_scheduler_job_run_details
 (
-        log_id bigserial PRIMARY KEY, -- unique identifier of the log entry
-        log_date timestamp with time zone DEFAULT current_timestamp, -- date of the log entry
+        log_id bigserial, -- unique identifier of the log entry
+        log_date timestamp with time zone NOT NULL DEFAULT current_timestamp, -- date of the log entry (partition key)
         owner name, -- owner of the scheduler job
         job_name varchar(261), -- name of the scheduler job
         job_subname varchar(261), -- Subname of the Scheduler job (for a chain step job)
-        status varchar(128), -- status of the job run
+        status text, -- status of the job run
         error char(5), -- error code in the case of an error
         req_start_date timestamp with time zone, -- requested start date of the job run
         actual_start_date timestamp with time zone, -- actual date on which the job was run
@@ -380,8 +380,70 @@ CREATE TABLE dbms_job.all_scheduler_job_run_details
         session_id integer, -- session identifier of the job run
         slave_pid integer, -- process identifier of the slave on which the job was run
         cpu_used integer, -- amount of cpu used for the job run
-        additional_info text -- additional information on the job run, error message, etc.
-);
+        additional_info text, -- additional information on the job run, error message, etc.
+        PRIMARY KEY (log_id, log_date)
+) PARTITION BY RANGE (log_date);
+```
+
+### Partitioning and retention
+
+This is a write-only table: the scheduler appends one row per job execution and never reads it back. On a busy system it therefore grows without bound (it is easy to reach tens of GB and hundreds of millions of rows), which also slows down the queue scans by evicting their pages from cache. To keep it bounded it is **range-partitioned by `log_date`** (one partition per month), so old history is removed by dropping whole partitions instead of `DELETE` + `VACUUM`. This requires **PostgreSQL 11+**.
+
+`log_date` is part of the primary key because a partitioned table's primary key must include its partition key. The scheduler never sets `log_id` or `log_date` explicitly (both use their column defaults), so this is transparent to the daemon.
+
+A maintenance function creates upcoming partitions and prunes old ones:
+
+```sql
+-- ensure the current + next month exist, drop partitions older than 3 months
+SELECT dbms_job.maintain_run_details_partitions(months_ahead => 1, retention_months => 3);
+```
+
+A **DEFAULT partition** (`all_scheduler_job_run_details_default`) is created as a safety net, so inserts never fail even if the maintenance function is not called — a lapse only leaves rows in the DEFAULT partition and pauses pruning, it never breaks logging.
+
+Call the maintenance function regularly (it issues `CREATE`/`DROP TABLE`, so run it as a privileged role) — either from `cron`, or by submitting it as a recurring job:
+
+```sql
+SELECT dbms_job.submit(
+    'PERFORM dbms_job.maintain_run_details_partitions();',
+    current_timestamp,
+    'current_timestamp + interval ''1 day''');
+```
+
+To turn off pruning while still creating partitions, pass `retention_months => 0`.
+
+#### Converting an existing (non-partitioned) install
+
+Fresh installs (`CREATE EXTENSION pg_dbms_job`) already get the partitioned table. An install created with an earlier version has a plain table that must be converted once, using the migration script shipped in [`updates/migrate_all_scheduler_job_run_details_to_partitioned.sql`](updates/migrate_all_scheduler_job_run_details_to_partitioned.sql):
+
+```bash
+psql -d <database> -f updates/migrate_all_scheduler_job_run_details_to_partitioned.sql
+```
+
+What it does, and how to use it:
+
+- **Run it as the table owner / a superuser** (the same role the extension was installed with) on **PostgreSQL 11+**.
+- It runs in a single transaction and **copies no data**, so it only holds a brief `ACCESS EXCLUSIVE` lock (sub-second). The scheduler's inserts pause for that moment and then continue against the new table — **no daemon restart is required**.
+- Existing history is **preserved**, not deleted: the old table is renamed aside to `dbms_job.all_scheduler_job_run_details_old`. The new partitioned table starts empty (with the current/next month and DEFAULT partitions).
+- The script refuses to run if the table is already partitioned, so it is safe to invoke by mistake.
+
+After verifying the daemon still logs into the new table, finish up (these steps are listed, commented, at the bottom of the migration file):
+
+```sql
+-- optional: register the new objects with the extension (keeps pg_dump / DROP EXTENSION correct)
+ALTER EXTENSION pg_dbms_job ADD FUNCTION dbms_job.maintain_run_details_partitions(integer, integer);
+ALTER EXTENSION pg_dbms_job ADD TABLE dbms_job.all_scheduler_job_run_details;
+
+-- reclaim the disk used by the old history (irreversible — this is where the space is freed)
+ALTER EXTENSION pg_dbms_job DROP TABLE dbms_job.all_scheduler_job_run_details_old;
+DROP TABLE dbms_job.all_scheduler_job_run_details_old;
+```
+
+To keep some recent history instead of discarding all of it, copy it across **before** dropping the old table (the target month partitions must already exist):
+
+```sql
+INSERT INTO dbms_job.all_scheduler_job_run_details
+SELECT * FROM dbms_job.all_scheduler_job_run_details_old
+WHERE log_date >= current_date - interval '7 days';
 ```
 
 ## [Procedures](#procedures)

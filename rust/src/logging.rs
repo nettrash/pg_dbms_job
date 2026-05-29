@@ -372,6 +372,8 @@ mod tests {
             startup_delay: 3.0,
             error_delay: 1.0,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         }
     }
 
@@ -434,6 +436,8 @@ mod tests {
             startup_delay: 3.0,
             error_delay: 1.0,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         // Should print to stderr without crashing
         dprint(&config, "LOG", "stderr fallback");
@@ -563,6 +567,8 @@ mod tests {
             startup_delay: 3.0,
             error_delay: 1.0,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         dprint(&cfg, "LOG", "date formatted");
         flush_logger();
@@ -825,6 +831,8 @@ mod tests {
             startup_delay: 3.0,
             error_delay: 1.0,
             stats_interval: 0,
+            job_run_details: crate::model::JobRunDetails::All,
+            stale_job_timeout: 3600.0,
         };
         dprint(&cfg, "LOG", "stderr fallback before reopen");
         reopen_logger();

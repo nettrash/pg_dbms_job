@@ -23,25 +23,25 @@ mod tests {
     }
 
     #[test]
-    fn version_has_rust_suffix() {
-        // Project convention: every Rust scheduler release tags the version
-        // with "-rust" so it never collides with the SQL extension's version.
+    fn version_has_no_prerelease_suffix() {
+        // Since 3.0.0 the scheduler and the SQL extension share one plain
+        // semver (the historical "-rust" suffix was dropped). Guard against a
+        // suffix or build-metadata creeping back in.
         assert!(
-            VERSION.ends_with("-rust"),
-            "VERSION ({VERSION}) must end with -rust; check Cargo.toml"
+            !VERSION.contains('-') && !VERSION.contains('+'),
+            "VERSION ({VERSION}) must be a plain MAJOR.MINOR.PATCH; check Cargo.toml"
         );
     }
 
     #[test]
-    fn version_has_semver_numeric_prefix() {
-        // The portion before "-rust" must be a dotted numeric semver
-        // (e.g. "1.5.11"). Catches typos like "1.5..11-rust" or "v1.5.11-rust".
-        let prefix = VERSION.strip_suffix("-rust").expect("checked above");
-        let parts: Vec<&str> = prefix.split('.').collect();
+    fn version_is_semver_numeric() {
+        // VERSION must be a dotted numeric semver (e.g. "3.0.0"). Catches typos
+        // like "3.0..0" or "v3.0.0".
+        let parts: Vec<&str> = VERSION.split('.').collect();
         assert_eq!(
             parts.len(),
             3,
-            "version prefix must be MAJOR.MINOR.PATCH, got {prefix}"
+            "version must be MAJOR.MINOR.PATCH, got {VERSION}"
         );
         for p in &parts {
             assert!(

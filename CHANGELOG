@@ -1,0 +1,52 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+## 3.0.0 - 2026-05-29
+
+First release of the Rust-based line. The scheduler and the SQL extension now
+share a single version (3.0.0); the historical `-rust` suffix on the scheduler
+has been dropped.
+
+### Removed
+- The legacy Perl scheduler (`bin/pg_dbms_job`) and its Perl TAP test suite
+  (`t/`, `test/`). The scheduler is now Rust-only; its tests run with
+  `cargo test` in `rust/`.
+
+### Added
+- Configurable job-history recording via `job_run_details` (`all` | `errors` |
+  `none`, default `all`) to bound the growth of
+  `dbms_job.all_scheduler_job_run_details`.
+- `stale_job_timeout` (seconds, default `3600`, `0` disables): a reaper that
+  re-queues jobs left flagged running (`this_date` set) by a worker that never
+  finished. It only acts on jobs older than the timeout with no live worker
+  backend in `pg_stat_activity`, so a long-running job is never re-queued while
+  still executing.
+- Monthly range-partitioning of `dbms_job.all_scheduler_job_run_details` (for
+  fresh installs), with a DEFAULT catch-all partition and the
+  `dbms_job.maintain_run_details_partitions(months_ahead, retention_months)`
+  maintenance function for creating upcoming partitions and dropping old ones.
+- Standalone migration script
+  `updates/migrate_all_scheduler_job_run_details_to_partitioned.sql` to convert
+  an existing history table to partitioned.
+- Partial dispatch indexes (`all_async_jobs_pending_idx`,
+  `all_scheduled_jobs_pending_idx`) and aggressive per-table autovacuum settings
+  on the queue tables, shipped with the extension.
+- `Makefile` targets that build and install the Rust scheduler binary
+  (`rust-build`, `rust-install`, `rust-clean`); `make` / `make install` now
+  build and install the daemon alongside the SQL extension.
+
+### Changed
+- Unified scheduler + SQL extension version at 3.0.0; dropped the `-rust`
+  scheduler version suffix.
+- Documentation (root `README.md`, `rust/README.md`) updated to be Rust-only and
+  to document the current configuration options, defaults, and the
+  partitioning/retention model.
+
+### Upgrade notes
+- `ALTER EXTENSION pg_dbms_job UPDATE TO '3.0.0';` adds the indexes, autovacuum
+  settings, and the partition-maintenance function. Converting the existing
+  history table to partitioned is a separate, deliberate step — run
+  `updates/migrate_all_scheduler_job_run_details_to_partitioned.sql` by hand.
+- Review the scheduler config: size `pool_size` to what the database can serve
+  well (roughly CPU cores x 2-4) and keep `job_queue_processes` <= `pool_size`.

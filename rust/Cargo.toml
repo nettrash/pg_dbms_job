@@ -1,8 +1,13 @@
+# Copyright (c) 2021-2023 MigOps Inc. (original extension and Perl scheduler)
+# Copyright (c) 2025-2026 nettrash (Rust scheduler and fork enhancements)
+# Licensed under the MIT License; see the LICENSE file at the repository root.
 [package]
 name = "pg_dbms_job"
-version = "1.5.15-rust"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT"
+authors = ["nettrash <nettrash@nettrash.me>"]
 
 [dependencies]
 chrono = "0.4"

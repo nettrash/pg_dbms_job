@@ -1,6 +1,6 @@
-# Rust Port of pg_dbms_job
+# pg_dbms_job scheduler daemon
 
-This folder contains a Rust implementation of the `pg_dbms_job` scheduler daemon. It mirrors the Perl daemon logic (config parsing, LISTEN/NOTIFY, job polling, fork-per-job execution, and run history writes), but is built as a standalone Rust crate.
+This folder contains the `pg_dbms_job` scheduler daemon, built as a standalone Rust crate. It handles config parsing, LISTEN/NOTIFY, job polling, per-job execution, and run-history writes.
 
 ## Build
 
@@ -160,4 +160,4 @@ passwd=secret
 
 - The Rust implementation uses `postgres` crate and `nix` for forking and signals.
 - The scheduler uses `LISTEN` on `dbms_job_async_notify` and `dbms_job_scheduled_notify`.
-- Logs follow the same timestamped format as the Perl daemon.
+- Logs use a timestamped, single-line format written by a dedicated logger thread.

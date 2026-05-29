@@ -2,6 +2,16 @@
 
 PostgreSQL extension to schedules and manages jobs in a job queue similar to Oracle DBMS_JOB package.
 
+> **About this fork.** This variant replaces the original Perl scheduler with a
+> standalone **Rust daemon** (in [`rust/`](rust/)) and adds several performance
+> and operational improvements that ship with the extension: partial dispatch
+> indexes and per-table autovacuum tuning on the queue tables, an r2d2
+> connection pool, a reaper that recovers abandoned ("zombie") jobs, a
+> configurable job-history recording mode, and monthly partitioning + retention
+> for the job-history table. The SQL interface remains compatible with the
+> original. See [`rust/README.md`](rust/README.md) for the full scheduler
+> reference.
+
 * [Description](#description)
 * [Installation](#installation)
 * [Manage the extension](#manage-the-extension)
@@ -38,36 +48,32 @@ If a scheduled job completes successfully, then its new execution date is placed
 
 This extension consist in a SQL script to create all the objects related to its operation and a daemon that must be run attached to the database where jobs are defined. The daemon is responsible to execute the queued asynchronous jobs and the scheduled ones. It can be run on the same host of the database, where the jobs are defined, or on any other host. The schedule time is taken from the database host not where the daemon is running.
 
-The number of jobs that can be executed at the same time is limited to 1000 by default. If this limit is reached the daemon will wait that a process ends to run a new one.
+The number of jobs that can be executed at the same time is limited to `job_queue_processes` (1024 by default), and the daemon never opens more than `pool_size` database connections (100 by default). If the concurrency limit is reached the daemon waits for a running job to finish before starting a new one.
 
-The use of an external scheduler daemon instead of a background worker is a choice, being able to fork thousands of sub-processes from a background worker is not a good idea.
+The scheduler is implemented as a standalone Rust daemon rather than a PostgreSQL background worker. This is a deliberate choice: the work runs in a separate process (it can even run on a different host than the database), executes jobs concurrently on worker threads drawn from a bounded connection pool, and is not constrained by background-worker slots.
 
-The job execution is caused by a NOTIFY event received by the scheduler when a new job is submitted or modified. The notifications are polled every 0.1 second. When there is no notification the scheduler polls every `job_queue_interval` seconds (5 seconds by default) the tables where job definition are stored. This mean that at worst a job will be executed `job_queue_interval` seconds after the next execution date defined.
+The job execution is caused by a NOTIFY event received by the scheduler when a new job is submitted or modified. The notifications are polled every `nap_time` seconds (0.1 second by default). When there is no notification the scheduler polls every `job_queue_interval` seconds (0.1 second by default) the tables where job definitions are stored. This means that at worst a job will be executed `job_queue_interval` seconds after the next execution date defined.
 
 
 ## [Installation](#installation)
 
-There is no special requirement to run this extension but your PostgreSQL version must support extensions (>= 9.1) and Perl must be available as well as the DBI, DBD::Pg and Time::Hires Perl modules. If your distribution doesn't include these Perl modules you can always install them using CPAN:
+The SQL extension only requires a PostgreSQL version that supports extensions
+(>= 9.1). The scheduler is a standalone daemon written in Rust (see
+[`rust/`](rust/) and [`rust/README.md`](rust/README.md)); build it with `cargo`
+or use the provided Docker image — it has no Perl or other runtime dependency.
 
-    perl -MCPAN -e 'install DBI'
-    perl -MCPAN -e 'install DBD::Pg'
-
-or in Debian like distribution use:
-
-    apt install libdbi-perl libpg-perl
-
-and on RPM based system:
-
-    yum install perl-DBI perl-DBD-Pg perl-Time-HiRes
-
-To install the extension execute
+To install the SQL extension execute
 
     make
     sudo make install
 
-Test of the extension can be done using:
+To build the scheduler daemon:
 
-    make installcheck
+    cd rust && cargo build --release
+
+The Rust scheduler's unit tests run with:
+
+    cd rust && cargo test
 
 ## [Manage the extension](#manage-the-extension)
 
@@ -77,11 +83,11 @@ Each database that needs to use `pg_dbms_job` must creates the extension:
 
 To upgrade to a new version execute:
 
-    psql -d mydb -c 'ALTER EXTENSION pg_dbms_job UPDATE TO "1.4.0"'
+    psql -d mydb -c 'ALTER EXTENSION pg_dbms_job UPDATE TO "3.0.0"'
 
 If you doesn't have the privileges to create an extension you can just import the extension file into the database, for example:
 
-    psql -d mydb -f sql/pg_dbms_job--1.4.0.sql
+    psql -d mydb -f sql/pg_dbms_job--3.0.0.sql
 
 This is especially useful for database in DBaas cloud services. To upgrade just import the extension upgrade files using psql.
 
@@ -89,7 +95,7 @@ A dedicated scheduler per database using the extension must be started.
 
 ## [Running the scheduler](#running-the-scheduler)
 
-The scheduler is a Perl program that runs in background it can be executed by any system user as follow:
+The scheduler is a standalone daemon (the Rust binary, see [`rust/README.md`](rust/README.md)) that runs in background; it can be executed by any system user as follow:
 
     pg_dbms_job -c /etc/pg_dbms_job/mydb-dbms_job.conf
 
@@ -118,7 +124,7 @@ pg_dbms_job -c /etc/pg_dbms_job/mydb-dbms_job.conf -k
 you can also send the TERM signal to the main process:
 ```
 $ ps auwx | grep "pg_dbms_job:main" | grep -v grep
-gilles     14754  0.0  0.0  39636 17492 ?        Ss   10:15   0:00 pg_dbms_job:main
+postgres   14754  0.0  0.0  39636 17492 ?        Ss   10:15   0:00 pg_dbms_job:main
 
 $ kill -15 14754
 ```
@@ -130,7 +136,7 @@ pg_dbms_job -c /etc/pg_dbms_job/mydb-dbms_job.conf -m
 or send the INT signal:
 ```
 $ ps auwx | grep "pg_dbms_job:main" | grep -v grep
-gilles     14754  0.0  0.0  39636 17492 ?        Ss   10:15   0:00 pg_dbms_job:main
+postgres   14754  0.0  0.0  39636 17492 ?        Ss   10:15   0:00 pg_dbms_job:main
 
 $ kill -2 14754
 ```
@@ -184,59 +190,66 @@ Time-based rotation needs no signal at all: put an `strftime()` escape in
 `logfile` (e.g. `logfile=/var/log/pg_dbms_job/pg_dbms_job-%Y%m%d.log`) and
 the daemon switches files automatically when the formatted name changes.
 
-### Recommended indexes
+### Dispatch performance (built in)
 
 The scheduler polls the job tables on every notification and on every
-`job_queue_interval`. With many rows, the dispatch UPDATEs become a hot
-path. Add these once per database after `CREATE EXTENSION` if your
-workload exceeds a few hundred jobs:
+`job_queue_interval`, so the dispatch `UPDATE`s are a hot path. To keep them
+fast this extension **ships** the supporting partial indexes and aggressive
+per-table autovacuum settings — no manual step is needed on a fresh install:
 
 ```sql
--- async dispatch: WHERE this_date IS NULL
-CREATE INDEX IF NOT EXISTS all_async_jobs_pending_idx
-    ON dbms_job.all_async_jobs (this_date)
-    WHERE this_date IS NULL;
+-- partial indexes covering only the not-yet-running jobs
+CREATE INDEX all_async_jobs_pending_idx
+    ON dbms_job.all_async_jobs (job)        WHERE this_date IS NULL;
+CREATE INDEX all_scheduled_jobs_pending_idx
+    ON dbms_job.all_scheduled_jobs (next_date) WHERE this_date IS NULL;
 
--- scheduled dispatch — interval-based:
---   WHERE interval IS NOT NULL AND NOT broken AND this_date IS NULL AND next_date <= now()
-CREATE INDEX IF NOT EXISTS all_scheduled_jobs_due_idx
-    ON dbms_job.all_scheduled_jobs (next_date)
-    WHERE interval IS NOT NULL AND NOT broken AND this_date IS NULL;
-
--- scheduled dispatch — one-shot (interval IS NULL) path:
-CREATE INDEX IF NOT EXISTS all_scheduled_jobs_oneshot_idx
-    ON dbms_job.all_scheduled_jobs (next_date)
-    WHERE interval IS NULL AND this_date IS NULL;
+-- vacuum/analyze the high-churn queue tables aggressively so they stay compact
+ALTER TABLE dbms_job.all_async_jobs     SET (autovacuum_vacuum_scale_factor = 0.0,
+    autovacuum_vacuum_threshold = 100, autovacuum_analyze_scale_factor = 0.0,
+    autovacuum_analyze_threshold = 100, autovacuum_vacuum_cost_delay = 0);
+ALTER TABLE dbms_job.all_scheduled_jobs SET ( ... same ... );
 ```
 
-These are partial indexes so they stay small even with a large history.
+If you are upgrading a database created before these were added, run the same
+statements once (they are idempotent). The indexes are partial so they stay
+small even with a large queue.
 
 ## [Configuration](#configuration)
 
-The format of the configuration file is the same as `postgresql.conf`.
+The configuration file uses simple `key = value` lines (the same style as `postgresql.conf`). The settings below are the ones most commonly tuned; [`rust/README.md`](rust/README.md) is the authoritative reference for every option, and [`etc/pg_dbms_job.conf`](etc/pg_dbms_job.conf) is a ready-to-edit template.
 
 ### General
 
-- `debug`: debug mode. Default 0, disabled.
-- `pidfile`: path to pid file. Default to `/tmp/pg_dbms_job.pid`.
-- `logfile`: log file name pattern, can include strftime() escapes, for example
-   to have a log file per week day use `%a` in the log file name.
-   Default `/tmp/pg_dbms_job.log`.
-- `log_truncate_on_rotation`: If activated an existing log file with the same
-   name as the new log file will be truncated rather than appended to. But such
-   truncation only occurs on time-driven rotation, not on restarts. Default `0`,
-   disabled.
-- `job_queue_interval`: poll interval of the jobs queue. Default 5 seconds.
-- `job_queue_processes`: Maximum number of job processed at the same time.
-   Default `1000`.
-- `nap_time`: Time to wait in the main loop before each run. Default `100ms`
+- `debug`: debug mode (`0`/`1`). Default `0`. The `-d` CLI flag overrides it.
+- `pidfile`: path to the pid file. Default `/tmp/pg_dbms_job.pid`.
+- `logfile`: log file name pattern; may contain `strftime()` escapes (e.g. `%a` for a
+   per-weekday file, `%Y%m%d` for a daily file). Default empty, which logs to stderr.
+- `log_truncate_on_rotation`: if `1`, an existing log file with the same name as the new
+   one is truncated rather than appended to (only on time-driven rotation, not on restart).
+   Default `0`.
+- `job_queue_interval`: fallback poll interval of the job tables, in seconds (float). Default `0.1`.
+- `job_queue_processes`: maximum number of jobs running concurrently. Default `1024`.
+- `pool_size`: maximum number of PostgreSQL connections in the worker pool; clamped at
+   runtime to `min(pool_size, job_queue_processes)`. Default `100`.
+- `nap_time`: `LISTEN`/notification timeout per main-loop cycle, in seconds (float). Default `0.1`.
+- `startup_delay`: delay before retrying after a failed connection or a database in
+   recovery, in seconds. Default `3.0`.
+- `error_delay`: delay applied when the worker queue is saturated, in seconds. Default `0.5`.
+- `stats_interval`: period for the periodic `jobs started/finished` LOG line, in seconds;
+   `0` disables it. Default `15`.
+- `job_run_details`: how much job history is written to `all_scheduler_job_run_details`
+   (`all` | `errors` | `none`); `errors` records only failed runs, `none` disables recording.
+   Default `all`. See [Jobs execution history](#jobs-execution-history).
+- `stale_job_timeout`: age (seconds) after which a job flagged running with no live worker
+   backend is treated as abandoned and re-queued by the reaper; `0` disables it. Default `3600`.
 
 ### Database
 
-- `host`: ip adresse or hostname where the PostgreSQL cluster is running.
+- `host`: ip address or hostname where the PostgreSQL cluster is running.
 - `port`: port where the PostgreSQL cluster is listening.
-- `database`: name of the database where to connect.
-- `user`: username used to connect to the database, it must be a superuser role.
+- `database`: name of the database to connect to.
+- `user`: role used to connect; it must own the `dbms_job` tables or be a superuser, so it can bypass Row Level Security and run each job under its owner's role via `SET ROLE`.
 - `passwd`: password for this role.
 
 ### Example
@@ -244,7 +257,7 @@ The format of the configuration file is the same as `postgresql.conf`.
 #-----------
 #  General
 #-----------
-# Toogle debug mode
+# Toggle debug mode
 debug=0
 # Path to the pid file
 pidfile=/tmp/pg_dbms_job.pid
@@ -255,12 +268,24 @@ logfile=/tmp/pg_dbms_job.log
 # file will be truncated rather than appended to. But such truncation
 # only occurs on time-driven rotation, not on restarts.
 log_truncate_on_rotation=0
-# Poll interval of the job queue
-job_queue_interval=5
-#Maximum number of job processed at the same time
-job_queue_processes=1000
-# Time to wait in the main loop before each run (to free some CPU resources)
-nap_time = 0.1
+# Fallback poll interval of the job tables (seconds)
+job_queue_interval=0.1
+# Maximum number of jobs running concurrently
+job_queue_processes=1024
+# Maximum PostgreSQL connections in the worker pool (size to the server)
+pool_size=100
+# Main-loop LISTEN timeout (seconds) - controls notification latency
+nap_time=0.1
+# Delay before retrying after connect failures (seconds)
+startup_delay=3.0
+# Delay when the worker queue is saturated (seconds)
+error_delay=0.5
+# Period (seconds) for the periodic job-stats LOG line; 0 disables it
+stats_interval=15
+# Job-run history: all = every run, errors = failures only, none = disabled
+job_run_details=all
+# Re-queue jobs flagged running with no live worker after N seconds; 0 disables
+stale_job_timeout=3600
 
 #-----------
 #  Database
@@ -268,8 +293,8 @@ nap_time = 0.1
 host=localhost
 port=5432
 database=dbms_job
-user=gilles
-passwd=gilles
+user=postgres
+passwd=postgres
 ```
 
 To force the scheduler to reread the configuration file after changes you can use the `-r` option:
@@ -279,7 +304,7 @@ pg_dbms_job -c /etc/pg_dbms_job/mydb-dbms_job.conf -r
 or send the HUP signal:
 ```
 $ ps auwx | grep "pg_dbms_job:main" | grep -g grep
-gilles     14758  0.0  0.0  39636 17492 ?        Ss   10:17   0:00 pg_dbms_job:main
+postgres   14758  0.0  0.0  39636 17492 ?        Ss   10:17   0:00 pg_dbms_job:main
 
 $ kill -1 14758
 ```
@@ -692,7 +717,7 @@ Example:
 
 ## [Limitations](#limitations)
 
-Following the job activity a certain amount of bloat can be created in queues tables which can slow down the collect of job to execute by the scheduler. In this case it is recommended to execute a VACUUM FULL on these tables periodically when there is no activity.
+Job activity is highly write-intensive (one `UPDATE` per dispatch and per completion), so the queue tables can bloat and slow down the scheduler's collection scans. This extension already ships aggressive per-table autovacuum settings (see [Dispatch performance](#dispatch-performance-built-in)) to keep that in check, but a database that accumulated bloat before those settings were applied — or one that has been under sustained heavy load — can still benefit from a one-off compaction when there is no activity:
 
 ```
 VACUUM FULL dbms_job.all_scheduled_jobs, dbms_job.all_async_jobs;
@@ -703,15 +728,18 @@ If you have a very high job execution use that generates thousands of NOTIFY per
 DROP TRIGGER dbms_job_scheduled_notify_trg ON dbms_job.all_scheduled_jobs;
 DROP TRIGGER dbms_job_async_notify_trg ON dbms_job.all_async_jobs;
 ```
-Once the trigger are dropped the polling of job will only be done every `job_queue_interval` seconds (5 seconds by default).
+Once the triggers are dropped the polling of jobs will only be done every `job_queue_interval` seconds (0.1 second by default).
 
 ## [Authors](#authors)
 
-- Gilles Darold
+- Gilles Darold — original `pg_dbms_job` extension and Perl scheduler.
+- nettrash — Rust scheduler daemon and the performance/operational improvements in this fork (connection pool, dispatch indexes and autovacuum tuning, zombie-job reaper, configurable job-history recording, history-table partitioning).
 
 ## [License](#license)
 
-This extension is free software distributed under the PostgreSQL
-License.
+This extension is free software distributed under the MIT License (see the
+[`LICENSE`](LICENSE) file). The original extension and Perl scheduler were
+released by MigOps Inc. under the PostgreSQL License.
 
-    Copyright (c) 2021-2023 MigOps Inc.
+    Copyright (c) 2021-2023 MigOps Inc. (original extension and Perl scheduler)
+    Copyright (c) 2025-2026 nettrash (Rust scheduler and fork enhancements)

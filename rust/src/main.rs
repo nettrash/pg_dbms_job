@@ -24,7 +24,7 @@ use crate::process::{
 use crate::util::die;
 use fallible_iterator::FallibleIterator;
 use nix::sys::signal::Signal;
-use postgres::Client;
+use postgres::{Client, Notification};
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::collections::HashMap;
@@ -228,31 +228,13 @@ fn main() {
         if let Some(client) = dbh.as_mut() {
             config_invalidated = false;
             let mut notifications = client.notifications();
-            let mut iter = notifications.timeout_iter(Duration::from_secs_f64(config.nap_time));
-            loop {
-                match iter.next() {
-                    Ok(Some(notification)) => {
-                        dlog!(
-                            &config,
-                            "DEBUG",
-                            "Received notification: ({}, {}, {})",
-                            notification.channel(),
-                            notification.process_id(),
-                            notification.payload()
-                        );
-                        if notification.channel() == "dbms_job_async_notify" {
-                            async_count += 1;
-                        } else if notification.channel() == "dbms_job_scheduled_notify" {
-                            scheduled_count += 1;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(err) => {
-                        dlog!(&config, "ERROR", "notification error: {err}");
-                        break;
-                    }
-                }
-            }
+            collect_notifications(
+                &mut notifications,
+                &config,
+                Duration::from_secs_f64(config.nap_time),
+                &mut async_count,
+                &mut scheduled_count,
+            );
         } else {
             thread::sleep(Duration::from_secs_f64(config.startup_delay));
             startup = true;
@@ -393,6 +375,119 @@ fn main() {
     shutdown_logger();
 }
 
+/// The minimal view of a backend notification the main loop needs: enough to
+/// route it to the right job-table scan and to log it. Abstracted into a trait
+/// so the dispatch-collection logic can be unit tested without a live database.
+trait NotificationLike {
+    fn channel(&self) -> &str;
+    fn process_id(&self) -> i32;
+    fn payload(&self) -> &str;
+}
+
+impl NotificationLike for Notification {
+    fn channel(&self) -> &str {
+        Notification::channel(self)
+    }
+    fn process_id(&self) -> i32 {
+        Notification::process_id(self)
+    }
+    fn payload(&self) -> &str {
+        Notification::payload(self)
+    }
+}
+
+/// A source of backend notifications, split into the one operation that may
+/// block (`wait_first`) and the strictly non-blocking drain (`next_buffered`).
+/// Keeping them separate is what lets the main loop block at most once per
+/// dispatch cycle — see [`collect_notifications`].
+trait NotificationSource {
+    type Item: NotificationLike;
+    /// Block up to `timeout` for the next notification, or return `Ok(None)`
+    /// when the timeout elapses with none pending.
+    fn wait_first(&mut self, timeout: Duration) -> Result<Option<Self::Item>, postgres::Error>;
+    /// Return the next already-buffered notification without blocking, or
+    /// `Ok(None)` when the buffer is drained.
+    fn next_buffered(&mut self) -> Result<Option<Self::Item>, postgres::Error>;
+}
+
+impl NotificationSource for postgres::Notifications<'_> {
+    type Item = Notification;
+    fn wait_first(&mut self, timeout: Duration) -> Result<Option<Notification>, postgres::Error> {
+        self.timeout_iter(timeout).next()
+    }
+    fn next_buffered(&mut self) -> Result<Option<Notification>, postgres::Error> {
+        // A fresh non-blocking iter() per call polls the connection once and
+        // pops one buffered notification; it never waits on the network.
+        self.iter().next()
+    }
+}
+
+/// Count a received notification against the async or scheduled tally so the
+/// main loop knows which job tables to scan this cycle.
+fn tally_notification<N: NotificationLike>(
+    config: &Config,
+    notification: &N,
+    async_count: &mut usize,
+    scheduled_count: &mut usize,
+) {
+    dlog!(
+        config,
+        "DEBUG",
+        "Received notification: ({}, {}, {})",
+        notification.channel(),
+        notification.process_id(),
+        notification.payload()
+    );
+    if notification.channel() == "dbms_job_async_notify" {
+        *async_count += 1;
+    } else if notification.channel() == "dbms_job_scheduled_notify" {
+        *scheduled_count += 1;
+    }
+}
+
+/// Collect the notifications driving this dispatch cycle, tallying them per
+/// channel into `async_count` / `scheduled_count`.
+///
+/// Blocks up to `nap_time` for the *first* notification so the idle loop stays
+/// cheap, then drains any others that are already buffered WITHOUT blocking a
+/// second `nap_time`. This is the crux of the dispatch latency: the postgres
+/// `TimeoutIter` resets its delay on every notification and only returns `None`
+/// after a full `nap_time` of silence, so reusing it to drain would tax every
+/// dispatch with one extra `nap_time` of latency. `wait_first` is therefore
+/// invoked at most once per cycle.
+fn collect_notifications<S: NotificationSource>(
+    source: &mut S,
+    config: &Config,
+    nap_time: Duration,
+    async_count: &mut usize,
+    scheduled_count: &mut usize,
+) {
+    match source.wait_first(nap_time) {
+        Ok(Some(notification)) => {
+            tally_notification(config, &notification, async_count, scheduled_count)
+        }
+        // Nothing arrived this cycle: do not poll again, leave the tallies at 0.
+        Ok(None) => return,
+        Err(err) => {
+            dlog!(config, "ERROR", "notification error: {err}");
+            return;
+        }
+    }
+
+    loop {
+        match source.next_buffered() {
+            Ok(Some(notification)) => {
+                tally_notification(config, &notification, async_count, scheduled_count)
+            }
+            Ok(None) => break,
+            Err(err) => {
+                dlog!(config, "ERROR", "notification error: {err}");
+                break;
+            }
+        }
+    }
+}
+
 /// Default scheduler configuration values.
 fn default_config() -> Config {
     Config {
@@ -425,7 +520,163 @@ fn default_dbinfo() -> DbInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_config, default_dbinfo};
+    use super::{
+        NotificationLike, NotificationSource, collect_notifications, default_config, default_dbinfo,
+    };
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    /// A notification stub carrying only the channel name the tally logic reads.
+    struct FakeNotification {
+        channel: String,
+    }
+
+    impl FakeNotification {
+        fn new(channel: &str) -> Self {
+            FakeNotification {
+                channel: channel.to_string(),
+            }
+        }
+    }
+
+    impl NotificationLike for FakeNotification {
+        fn channel(&self) -> &str {
+            &self.channel
+        }
+        fn process_id(&self) -> i32 {
+            0
+        }
+        fn payload(&self) -> &str {
+            ""
+        }
+    }
+
+    /// A scripted notification source that records how often the (potentially
+    /// blocking) `wait_first` and the non-blocking `next_buffered` are called,
+    /// and can simulate `wait_first` blocking for a fixed duration.
+    struct FakeSource {
+        first: Option<FakeNotification>,
+        buffered: VecDeque<FakeNotification>,
+        wait_first_calls: usize,
+        next_buffered_calls: usize,
+        wait_first_sleep: Option<Duration>,
+    }
+
+    impl FakeSource {
+        fn new(first: Option<FakeNotification>, buffered: Vec<FakeNotification>) -> Self {
+            FakeSource {
+                first,
+                buffered: buffered.into(),
+                wait_first_calls: 0,
+                next_buffered_calls: 0,
+                wait_first_sleep: None,
+            }
+        }
+    }
+
+    impl NotificationSource for FakeSource {
+        type Item = FakeNotification;
+        fn wait_first(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<Option<FakeNotification>, postgres::Error> {
+            self.wait_first_calls += 1;
+            if let Some(d) = self.wait_first_sleep.take() {
+                std::thread::sleep(d);
+            }
+            Ok(self.first.take())
+        }
+        fn next_buffered(&mut self) -> Result<Option<FakeNotification>, postgres::Error> {
+            self.next_buffered_calls += 1;
+            Ok(self.buffered.pop_front())
+        }
+    }
+
+    // The whole point of the refactor: across a dispatch cycle the loop blocks
+    // at most ONCE (the first notification). Everything else is drained without
+    // blocking, so a cycle can never cost two nap_times.
+    #[test]
+    fn collect_notifications_blocks_at_most_once() {
+        let config = default_config();
+        let mut source = FakeSource::new(
+            Some(FakeNotification::new("dbms_job_async_notify")),
+            vec![
+                FakeNotification::new("dbms_job_scheduled_notify"),
+                FakeNotification::new("dbms_job_async_notify"),
+            ],
+        );
+        let (mut async_count, mut scheduled_count) = (0usize, 0usize);
+
+        collect_notifications(
+            &mut source,
+            &config,
+            Duration::from_millis(100),
+            &mut async_count,
+            &mut scheduled_count,
+        );
+
+        assert_eq!(
+            source.wait_first_calls, 1,
+            "must block at most once per cycle"
+        );
+        assert_eq!(async_count, 2);
+        assert_eq!(scheduled_count, 1);
+    }
+
+    // When nothing arrives within nap_time we must not poll again — the cycle
+    // ends with empty tallies and a single blocking wait.
+    #[test]
+    fn collect_notifications_idle_does_not_drain() {
+        let config = default_config();
+        let mut source = FakeSource::new(None, vec![]);
+        let (mut async_count, mut scheduled_count) = (0usize, 0usize);
+
+        collect_notifications(
+            &mut source,
+            &config,
+            Duration::from_millis(100),
+            &mut async_count,
+            &mut scheduled_count,
+        );
+
+        assert_eq!(source.wait_first_calls, 1);
+        assert_eq!(source.next_buffered_calls, 0, "idle cycle must not drain");
+        assert_eq!(async_count, 0);
+        assert_eq!(scheduled_count, 0);
+    }
+
+    // Latency guard: simulate the worst case where the first notification only
+    // arrives at the nap_time deadline, then drain the rest. The whole cycle
+    // must take ~one nap_time, never two — the regression this protects against
+    // (reusing TimeoutIter to drain) would have cost a second full nap_time.
+    #[test]
+    fn collect_notifications_does_not_wait_two_nap_times() {
+        let nap_time = Duration::from_millis(150);
+        let config = default_config();
+        let mut source = FakeSource::new(
+            Some(FakeNotification::new("dbms_job_async_notify")),
+            vec![FakeNotification::new("dbms_job_async_notify")],
+        );
+        source.wait_first_sleep = Some(nap_time);
+        let (mut async_count, mut scheduled_count) = (0usize, 0usize);
+
+        let start = Instant::now();
+        collect_notifications(
+            &mut source,
+            &config,
+            nap_time,
+            &mut async_count,
+            &mut scheduled_count,
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < nap_time * 2,
+            "dispatch cycle took {elapsed:?}, expected well under two nap_times ({:?})",
+            nap_time * 2
+        );
+        assert_eq!(async_count, 2);
+    }
 
     #[test]
     fn default_config_values() {

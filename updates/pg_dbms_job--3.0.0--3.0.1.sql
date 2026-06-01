@@ -1,0 +1,11 @@
+----
+-- Upgrade pg_dbms_job from 3.0.0 to 3.0.1.
+--
+-- Run with: ALTER EXTENSION pg_dbms_job UPDATE TO '3.0.1';
+--
+-- 3.0.1 is a scheduler-only release: it lowers the submit-to-execution latency
+-- of the Rust daemon (a dispatch cycle no longer waits an extra `nap_time`
+-- after receiving a notification). The SQL schema is unchanged from 3.0.0, so
+-- this migration intentionally does nothing but advance the extension version.
+-- Restart the scheduler binary to pick up the fix.
+----

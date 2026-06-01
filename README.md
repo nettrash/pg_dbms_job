@@ -83,11 +83,11 @@ Each database that needs to use `pg_dbms_job` must creates the extension:
 
 To upgrade to a new version execute:
 
-    psql -d mydb -c 'ALTER EXTENSION pg_dbms_job UPDATE TO "3.0.0"'
+    psql -d mydb -c 'ALTER EXTENSION pg_dbms_job UPDATE TO "3.0.1"'
 
 If you doesn't have the privileges to create an extension you can just import the extension file into the database, for example:
 
-    psql -d mydb -f sql/pg_dbms_job--3.0.0.sql
+    psql -d mydb -f sql/pg_dbms_job--3.0.1.sql
 
 This is especially useful for database in DBaas cloud services. To upgrade just import the extension upgrade files using psql.
 

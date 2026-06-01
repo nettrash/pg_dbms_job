@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## 3.0.1 - 2026-06-01
+
+Scheduler-only release. The SQL schema is unchanged from 3.0.0;
+`ALTER EXTENSION pg_dbms_job UPDATE TO '3.0.1';` only advances the version.
+Restart the scheduler binary to pick up the fix.
+
+### Fixed
+- Lowered submit-to-execution latency. Each dispatch cycle used to wait an
+  extra full `nap_time` even after a job's notification had already arrived,
+  because the postgres `TimeoutIter` resets its delay on every notification and
+  only returns once it has seen a full `nap_time` of silence. The main loop now
+  blocks at most once per cycle for the first notification, then drains any
+  others without blocking, so a submitted job dispatches in milliseconds instead
+  of up to one `nap_time` (and never two).
+
+### Added
+- Unit tests around the notification-collection logic (`collect_notifications`)
+  guaranteeing the loop blocks at most once per dispatch cycle and that a cycle
+  never costs two `nap_time`s.
+
 ## 3.0.0 - 2026-05-29
 
 First release of the Rust-based line. The scheduler and the SQL extension now

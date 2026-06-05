@@ -10,9 +10,69 @@ pub const REAP_INTERVAL_SECS: f64 = 60.0;
 /// Program name used in usage text and messaging, sourced from `Cargo.toml`.
 pub const PROGRAM: &str = env!("CARGO_PKG_NAME");
 
+/// Stack size (bytes) for each per-job worker thread. Workers only issue SQL
+/// over a pooled connection and format short strings — the heavy PL/pgSQL work
+/// happens inside the PostgreSQL backend, not here — so the 2 MiB default stack
+/// is wasteful. Under a burst of async jobs the scheduler can hold one live
+/// thread per in-flight job; a smaller stack keeps that fan-out from ballooning
+/// RSS. 512 KiB leaves ample headroom for the call chain.
+pub const WORKER_STACK_SIZE: usize = 512 * 1024;
+
+/// Bound on the number of pending log lines buffered between the producer
+/// threads and the single writer thread. The channel is intentionally bounded
+/// so a logging burst (e.g. debug logging under heavy async load) applies
+/// backpressure to producers instead of growing memory without limit.
+pub const LOG_CHANNEL_CAPACITY: usize = 16384;
+
+/// Maximum time (seconds) a worker waits to check out a pooled connection
+/// before giving up. With the worker count capped at the pool size a checkout
+/// should almost never block, so this only bounds the worst case (a stalled
+/// backend) instead of letting a worker hold its stack for the r2d2 default of
+/// 30 seconds.
+pub const POOL_CONNECTION_TIMEOUT_SECS: u64 = 10;
+
 #[cfg(test)]
 mod tests {
-    use super::{PROGRAM, VERSION};
+    use super::{
+        LOG_CHANNEL_CAPACITY, POOL_CONNECTION_TIMEOUT_SECS, PROGRAM, VERSION, WORKER_STACK_SIZE,
+    };
+
+    #[test]
+    fn worker_stack_size_is_sane() {
+        // Small enough to keep a burst of in-flight workers from ballooning
+        // RSS (well under the 2 MiB default), but large enough to hold the
+        // worker call chain comfortably.
+        const {
+            assert!(
+                WORKER_STACK_SIZE >= 128 * 1024,
+                "stack too small to be safe"
+            );
+            assert!(
+                WORKER_STACK_SIZE < 2 * 1024 * 1024,
+                "stack should be smaller than the 2 MiB default it replaces"
+            );
+        }
+    }
+
+    #[test]
+    fn log_channel_capacity_is_bounded_and_nonzero() {
+        // Bounded (so logging applies backpressure instead of growing without
+        // limit) yet generous enough to absorb normal bursts without blocking.
+        const {
+            assert!(LOG_CHANNEL_CAPACITY > 0);
+            assert!(LOG_CHANNEL_CAPACITY <= 1 << 20);
+        }
+    }
+
+    #[test]
+    fn pool_connection_timeout_is_shorter_than_r2d2_default() {
+        // We deliberately undercut r2d2's 30s default so a worker can't hold a
+        // stack waiting that long when the pool is momentarily saturated.
+        const {
+            assert!(POOL_CONNECTION_TIMEOUT_SECS > 0);
+            assert!(POOL_CONNECTION_TIMEOUT_SECS < 30);
+        }
+    }
 
     #[test]
     fn constants_are_expected() {

@@ -308,13 +308,15 @@ fn main() {
             previous_reap = Instant::now();
         }
 
+        let max_workers = effective_max_workers(&config);
+
         for (_, job) in scheduled_jobs.drain() {
-            while running_workers.len() >= config.job_queue_processes {
+            while running_workers.len() >= max_workers {
                 dlog!(
                     &config,
                     "WARNING",
                     "max job queue size is reached ({}) waiting the end of an other job",
-                    config.job_queue_processes
+                    max_workers
                 );
                 thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
@@ -331,12 +333,12 @@ fn main() {
         }
 
         for (_, job) in async_jobs.drain() {
-            while running_workers.len() >= config.job_queue_processes {
+            while running_workers.len() >= max_workers {
                 dlog!(
                     &config,
                     "WARNING",
                     "max job queue size is reached ({}) waiting the end of an other job",
-                    config.job_queue_processes
+                    max_workers
                 );
                 thread::sleep(Duration::from_secs_f64(config.error_delay));
                 reap_children(&mut running_workers);
@@ -488,6 +490,19 @@ fn collect_notifications<S: NotificationSource>(
     }
 }
 
+/// The maximum number of concurrent worker threads to keep in flight.
+///
+/// Never run more workers than there are pooled connections: a worker beyond
+/// the pool size can only block in `pool.get()`, holding a thread stack the
+/// whole time. Capping at the effective pool size keeps a burst of async jobs
+/// from spawning up to `job_queue_processes` (default 1024) threads that mostly
+/// sit waiting on the smaller pool — the dominant source of load-driven RSS
+/// growth. Floored at 1 so a degenerate `pool_size = 0` config still makes
+/// forward progress instead of spinning.
+fn effective_max_workers(config: &Config) -> usize {
+    config.job_queue_processes.min(config.pool_size).max(1)
+}
+
 /// Default scheduler configuration values.
 fn default_config() -> Config {
     Config {
@@ -521,7 +536,8 @@ fn default_dbinfo() -> DbInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        NotificationLike, NotificationSource, collect_notifications, default_config, default_dbinfo,
+        NotificationLike, NotificationSource, collect_notifications, default_config,
+        default_dbinfo, effective_max_workers,
     };
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
@@ -733,6 +749,34 @@ mod tests {
         // worker threads. Defaults guarantee pool_size <= job_queue_processes.
         let effective = config.pool_size.min(config.job_queue_processes);
         assert_eq!(effective, config.pool_size);
+    }
+
+    #[test]
+    fn effective_max_workers_is_capped_by_pool_size() {
+        // The whole point of the cap: with the defaults (1024 processes, 100
+        // pool) we must never run more than 100 workers, or the surplus threads
+        // just block on the pool holding stacks.
+        let config = default_config();
+        assert_eq!(effective_max_workers(&config), 100);
+        assert_eq!(effective_max_workers(&config), config.pool_size);
+    }
+
+    #[test]
+    fn effective_max_workers_is_capped_by_processes_when_smaller() {
+        // A small job_queue_processes wins over a large pool.
+        let mut config = default_config();
+        config.job_queue_processes = 4;
+        config.pool_size = 100;
+        assert_eq!(effective_max_workers(&config), 4);
+    }
+
+    #[test]
+    fn effective_max_workers_floored_at_one() {
+        // A degenerate pool_size = 0 must still let the loop dispatch one job
+        // at a time rather than busy-spinning on a zero cap.
+        let mut config = default_config();
+        config.pool_size = 0;
+        assert_eq!(effective_max_workers(&config), 1);
     }
 
     #[test]

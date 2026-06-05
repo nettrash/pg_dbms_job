@@ -49,6 +49,12 @@ Restart the scheduler binary to pick up the fix.
   cap, reaping finished workers, and blocking-then-logging when saturated), the
   bounded log channel draining a high-volume burst without loss, and
   compile-time sanity bounds on the new tuning constants.
+- A CI load test (`ci/load_test.sh`, wired into the `Async load test` workflow
+  job) that runs the real daemon against a live PostgreSQL, submits a burst of
+  asynchronous jobs, and asserts the queue fully drains and the daemon's peak
+  RSS stays under a ceiling — a regression guard for the bounded-memory work. It
+  runs on the default branch, on manual dispatch, or on PRs labelled
+  `load-test`, so normal PR CI stays fast.
 
 ## 3.0.1 - 2026-06-01
 

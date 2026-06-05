@@ -28,9 +28,25 @@ Restart the scheduler binary to pick up the fix.
   10 s so a momentarily saturated pool can't pin a worker (and its stack) for
   half a minute. A thread that still fails to spawn leaves the job's dispatch
   marker set, so the stale-job reaper re-queues it instead of losing work.
+- Made the "worker pool full" backpressure cheap and quiet now that it is
+  reached routinely (the cap equals the pool size rather than the old 1024).
+  The dispatcher polls for a free slot on a short fixed interval instead of
+  sleeping a full `error_delay` each time — the coarse wait would otherwise
+  throttle drain throughput to roughly `pool_size` jobs per `error_delay`. The
+  saturation notice is now emitted at LOG level and rate-limited to once per
+  `error_delay` seconds (shared across both dispatch loops) rather than once per
+  poll, so a sustained backlog no longer floods the log.
+
+### Changed
+- Logging no longer holds the global logger lock across the (now bounded,
+  possibly blocking) channel send. The sender is cloned out under the lock and
+  the send happens lock-free, so a backed-up log writer can't stall other
+  threads' logging — including the main dispatch loop — behind one producer.
 
 ### Added
 - Unit tests for the worker-concurrency cap (`effective_max_workers`), the
+  worker-slot backpressure wait (`await_worker_slot`: immediate return below the
+  cap, reaping finished workers, and blocking-then-logging when saturated), the
   bounded log channel draining a high-volume burst without loss, and
   compile-time sanity bounds on the new tuning constants.
 

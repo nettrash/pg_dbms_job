@@ -1,5 +1,7 @@
 //! Build-time constants for pg_dbms_job.
 
+use std::time::Duration;
+
 /// Current scheduler version string, sourced from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How often (seconds) the main loop scans for and clears stale dispatch
@@ -31,11 +33,21 @@ pub const LOG_CHANNEL_CAPACITY: usize = 16384;
 /// 30 seconds.
 pub const POOL_CONNECTION_TIMEOUT_SECS: u64 = 10;
 
+/// How long the dispatcher sleeps between checks while waiting for a worker
+/// slot to free up. Now that the worker count is capped at the (typically much
+/// smaller) pool size, this wait is hit routinely under load, so it must be
+/// short: a coarse interval would throttle drain throughput to roughly
+/// `pool_size` jobs per interval. Reaping finished workers is just a handful of
+/// non-blocking `is_finished()` checks, so polling this often is cheap.
+pub const WORKER_SLOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LOG_CHANNEL_CAPACITY, POOL_CONNECTION_TIMEOUT_SECS, PROGRAM, VERSION, WORKER_STACK_SIZE,
+        LOG_CHANNEL_CAPACITY, POOL_CONNECTION_TIMEOUT_SECS, PROGRAM, VERSION,
+        WORKER_SLOT_POLL_INTERVAL, WORKER_STACK_SIZE,
     };
+    use std::time::Duration;
 
     #[test]
     fn worker_stack_size_is_sane() {
@@ -62,6 +74,14 @@ mod tests {
             assert!(LOG_CHANNEL_CAPACITY > 0);
             assert!(LOG_CHANNEL_CAPACITY <= 1 << 20);
         }
+    }
+
+    #[test]
+    fn worker_slot_poll_interval_is_short() {
+        // The dispatcher hits this wait routinely under load, so it must stay
+        // small (sub-second) or it would throttle drain throughput.
+        assert!(WORKER_SLOT_POLL_INTERVAL > Duration::ZERO);
+        assert!(WORKER_SLOT_POLL_INTERVAL <= Duration::from_millis(100));
     }
 
     #[test]

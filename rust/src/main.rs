@@ -12,7 +12,7 @@ mod util;
 
 use crate::args::{parse_args, usage};
 use crate::config::read_config;
-use crate::constants::{REAP_INTERVAL_SECS, VERSION};
+use crate::constants::{REAP_INTERVAL_SECS, VERSION, WORKER_SLOT_POLL_INTERVAL};
 use crate::db::JobPool;
 use crate::db::{ConnectError, connect_db, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, reap_stale_jobs, spawn_job};
@@ -100,6 +100,7 @@ fn main() {
     let mut previous_reap = Instant::now();
     let job_stats = Arc::new(JobStats::default());
     let mut last_stats_at = Instant::now();
+    let mut last_saturation_log: Option<Instant> = None;
     let mut startup = true;
     let mut config_invalidated = false;
     let mut in_recovery_logged = false;
@@ -311,16 +312,12 @@ fn main() {
         let max_workers = effective_max_workers(&config);
 
         for (_, job) in scheduled_jobs.drain() {
-            while running_workers.len() >= max_workers {
-                dlog!(
-                    &config,
-                    "WARNING",
-                    "max job queue size is reached ({}) waiting the end of an other job",
-                    max_workers
-                );
-                thread::sleep(Duration::from_secs_f64(config.error_delay));
-                reap_children(&mut running_workers);
-            }
+            await_worker_slot(
+                &mut running_workers,
+                max_workers,
+                &config,
+                &mut last_saturation_log,
+            );
             spawn_job(
                 JobKind::Scheduled,
                 job,
@@ -333,16 +330,12 @@ fn main() {
         }
 
         for (_, job) in async_jobs.drain() {
-            while running_workers.len() >= max_workers {
-                dlog!(
-                    &config,
-                    "WARNING",
-                    "max job queue size is reached ({}) waiting the end of an other job",
-                    max_workers
-                );
-                thread::sleep(Duration::from_secs_f64(config.error_delay));
-                reap_children(&mut running_workers);
-            }
+            await_worker_slot(
+                &mut running_workers,
+                max_workers,
+                &config,
+                &mut last_saturation_log,
+            );
             spawn_job(
                 JobKind::Async,
                 job,
@@ -503,6 +496,48 @@ fn effective_max_workers(config: &Config) -> usize {
     config.job_queue_processes.min(config.pool_size).max(1)
 }
 
+/// Block until the running-worker count drops below `max_workers`, reaping
+/// finished workers on a short poll interval.
+///
+/// Now that `max_workers` equals the (usually much smaller) pool size, this
+/// backpressure point is reached routinely under load rather than being a
+/// "should never happen" guard, so two things changed from the original
+/// fixed-`error_delay` busy-wait:
+///   * It polls on a short, fixed interval ([`WORKER_SLOT_POLL_INTERVAL`])
+///     instead of `error_delay`. A coarse wait would cap drain throughput at
+///     roughly `max_workers` jobs per interval; reaping is just cheap
+///     non-blocking `is_finished()` checks, so polling fast costs almost
+///     nothing.
+///   * Being at the pool ceiling is normal saturation, not an error, so the
+///     notice is emitted at LOG level and rate-limited to once per
+///     `error_delay` seconds (shared across both dispatch loops via
+///     `last_saturation_log`) instead of once per poll — otherwise a sustained
+///     backlog would flood the log.
+fn await_worker_slot(
+    running_workers: &mut HashMap<u64, JoinHandle<()>>,
+    max_workers: usize,
+    config: &Config,
+    last_saturation_log: &mut Option<Instant>,
+) {
+    reap_children(running_workers);
+    while running_workers.len() >= max_workers {
+        let now = Instant::now();
+        let due = last_saturation_log
+            .is_none_or(|t| now.duration_since(t).as_secs_f64() >= config.error_delay);
+        if due {
+            dlog!(
+                config,
+                "LOG",
+                "worker pool saturated at {} concurrent jobs; further jobs are waiting (raise pool_size for more concurrency)",
+                max_workers
+            );
+            *last_saturation_log = Some(now);
+        }
+        thread::sleep(WORKER_SLOT_POLL_INTERVAL);
+        reap_children(running_workers);
+    }
+}
+
 /// Default scheduler configuration values.
 fn default_config() -> Config {
     Config {
@@ -536,10 +571,12 @@ fn default_dbinfo() -> DbInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        NotificationLike, NotificationSource, collect_notifications, default_config,
-        default_dbinfo, effective_max_workers,
+        NotificationLike, NotificationSource, await_worker_slot, collect_notifications,
+        default_config, default_dbinfo, effective_max_workers,
     };
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     /// A notification stub carrying only the channel name the tally logic reads.
@@ -768,6 +805,62 @@ mod tests {
         config.job_queue_processes = 4;
         config.pool_size = 100;
         assert_eq!(effective_max_workers(&config), 4);
+    }
+
+    #[test]
+    fn await_worker_slot_returns_immediately_when_below_cap() {
+        let config = default_config();
+        let mut running: HashMap<u64, thread::JoinHandle<()>> = HashMap::new();
+        let mut last = None;
+        // No workers running and a cap of 4: must not block and must not emit a
+        // saturation notice.
+        await_worker_slot(&mut running, 4, &config, &mut last);
+        assert!(running.is_empty());
+        assert!(last.is_none(), "must not log saturation below the cap");
+    }
+
+    #[test]
+    fn await_worker_slot_reaps_finished_without_logging() {
+        let config = default_config();
+        let mut running: HashMap<u64, thread::JoinHandle<()>> = HashMap::new();
+        running.insert(1, thread::spawn(|| {}));
+        thread::sleep(Duration::from_millis(50)); // let it finish
+        let mut last = None;
+        // The up-front reap clears the finished worker so the cap is no longer
+        // reached: it returns without ever entering the wait/log path.
+        await_worker_slot(&mut running, 1, &config, &mut last);
+        assert!(running.is_empty(), "finished worker must be reaped");
+        assert!(last.is_none(), "no wait happened, so no saturation log");
+    }
+
+    #[test]
+    fn await_worker_slot_blocks_until_slot_frees_and_logs_once() {
+        let config = default_config(); // error_delay = 0.5s throttle
+        let mut running: HashMap<u64, thread::JoinHandle<()>> = HashMap::new();
+        let barrier = Arc::new(Barrier::new(2));
+        let b = barrier.clone();
+        running.insert(
+            1,
+            thread::spawn(move || {
+                b.wait();
+            }),
+        );
+        // Release the blocked worker shortly after, from another thread.
+        let b2 = barrier.clone();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            b2.wait();
+        });
+        let mut last = None;
+        // Cap of 1 with a busy worker: the helper polls until the worker is
+        // released and reaped, then returns.
+        await_worker_slot(&mut running, 1, &config, &mut last);
+        releaser.join().unwrap();
+        assert!(running.is_empty(), "released worker must be reaped");
+        assert!(
+            last.is_some(),
+            "a real wait occurred, so saturation was logged at least once"
+        );
     }
 
     #[test]

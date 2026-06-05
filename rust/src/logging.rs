@@ -54,34 +54,48 @@ static LOG_STATE: Mutex<Option<LoggerState>> = Mutex::new(None);
 /// signal to write to stderr directly rather than panicking — losing logs is
 /// recoverable; killing the scheduler is not.
 fn with_sender<R>(f: impl FnOnce(&mpsc::SyncSender<LogCmd>) -> R) -> Option<R> {
-    let mut guard = match LOG_STATE.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let my_pid = process::id();
-    let need_spawn = match guard.as_ref() {
-        None => true,
-        Some(state) => state.pid != my_pid,
-    };
-    if need_spawn {
-        // Bounded so a logging burst applies backpressure to producers rather
-        // than buffering unbounded — under heavy async load with debug logging
-        // this queue was a primary driver of load-correlated memory growth.
-        let (tx, rx) = mpsc::sync_channel(LOG_CHANNEL_CAPACITY);
-        match std::thread::Builder::new()
-            .name("logger".into())
-            .spawn(move || log_writer_thread(rx))
-        {
-            Ok(_) => {
-                *guard = Some(LoggerState { pid: my_pid, tx });
-            }
-            Err(err) => {
-                eprintln!("ERROR: failed to spawn logger thread ({err}); falling back to stderr");
-                return None;
+    // Clone the sender out under the lock, then RELEASE the lock before calling
+    // `f`. `f` typically does a `send` on the now-bounded channel, which BLOCKS
+    // when the buffer is full. Holding the global `LOG_STATE` mutex across that
+    // blocking send would serialise every other thread's logging behind one
+    // backed-up producer (a lock convoy that could stall the main dispatch loop
+    // under a logging burst). `SyncSender` is cheap to clone (an Arc bump) and
+    // safe to use from multiple producers, so we pay one clone to keep the
+    // critical section short and send lock-free.
+    let sender = {
+        let mut guard = match LOG_STATE.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let my_pid = process::id();
+        let need_spawn = match guard.as_ref() {
+            None => true,
+            Some(state) => state.pid != my_pid,
+        };
+        if need_spawn {
+            // Bounded so a logging burst applies backpressure to producers
+            // rather than buffering unbounded — under heavy async load with
+            // debug logging this queue was a primary driver of load-correlated
+            // memory growth.
+            let (tx, rx) = mpsc::sync_channel(LOG_CHANNEL_CAPACITY);
+            match std::thread::Builder::new()
+                .name("logger".into())
+                .spawn(move || log_writer_thread(rx))
+            {
+                Ok(_) => {
+                    *guard = Some(LoggerState { pid: my_pid, tx });
+                }
+                Err(err) => {
+                    eprintln!(
+                        "ERROR: failed to spawn logger thread ({err}); falling back to stderr"
+                    );
+                    return None;
+                }
             }
         }
-    }
-    guard.as_ref().map(|s| f(&s.tx))
+        guard.as_ref().map(|s| s.tx.clone())
+    };
+    sender.as_ref().map(f)
 }
 
 /// Drop any sender inherited from a parent process. Call this in the child

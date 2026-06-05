@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
+## 3.0.2 - 2026-06-05
+
+Scheduler-only release. The SQL schema is unchanged from 3.0.1;
+`ALTER EXTENSION pg_dbms_job UPDATE TO '3.0.2';` only advances the version.
+Restart the scheduler binary to pick up the fix.
+
+### Fixed
+- Bounded the daemon's memory use under heavy asynchronous-job load, where RSS
+  grew with the number of in-flight jobs and was only released once the backlog
+  drained. Three buffers that scaled with load are now capped:
+  - Worker concurrency is limited to the effective connection-pool size
+    (`min(job_queue_processes, pool_size)`) instead of `job_queue_processes`.
+    Previously a burst could spawn up to `job_queue_processes` (default 1024)
+    threads, most of them blocked waiting on the much smaller pool while each
+    held a thread stack.
+  - Worker threads now use a 512 KiB stack instead of the 2 MiB default, since
+    they only drive SQL over a pooled connection.
+  - The log writer's channel is now bounded, so a logging burst (especially
+    debug logging under load) applies backpressure to producers instead of
+    buffering an unbounded queue of pending lines. No log lines are dropped and
+    timestamps remain accurate (lines are stamped at event time before
+    queueing).
+- Lowered the pooled-connection checkout timeout from r2d2's 30 s default to
+  10 s so a momentarily saturated pool can't pin a worker (and its stack) for
+  half a minute. A thread that still fails to spawn leaves the job's dispatch
+  marker set, so the stale-job reaper re-queues it instead of losing work.
+
+### Added
+- Unit tests for the worker-concurrency cap (`effective_max_workers`), the
+  bounded log channel draining a high-volume burst without loss, and
+  compile-time sanity bounds on the new tuning constants.
+
 ## 3.0.1 - 2026-06-01
 
 Scheduler-only release. The SQL schema is unchanged from 3.0.0;

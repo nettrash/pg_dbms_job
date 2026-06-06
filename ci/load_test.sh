@@ -22,8 +22,8 @@ JOBS="${LOAD_TEST_JOBS:-1000000}"                 # async jobs submitted in one 
 JOB_BODY="${LOAD_TEST_JOB_BODY:-PERFORM pg_sleep(0.1);}"  # keeps a worker busy ~100ms
 DRAIN_TIMEOUT="${LOAD_TEST_DRAIN_TIMEOUT:-180}"          # seconds allowed to fully drain
 RSS_CEILING_KB="${LOAD_TEST_RSS_CEILING_KB:-524288}"     # 512 MiB peak-RSS ceiling
-POOL_SIZE="${LOAD_TEST_POOL_SIZE:-128}"         # pooled connections == max live workers
-QUEUE_PROCESSES="${LOAD_TEST_QUEUE_PROCESSES:-128}"     # deliberately >> pool_size
+POOL_SIZE="${LOAD_TEST_POOL_SIZE:-32}"         # pooled connections == max live workers
+QUEUE_PROCESSES="${LOAD_TEST_QUEUE_PROCESSES:-32}"     # deliberately >> pool_size
 
 BIN="${LOAD_TEST_BIN:-rust/target/release/pg_dbms_job}"
 CONF="${LOAD_TEST_CONF:-/tmp/pg_dbms_job_loadtest.conf}"

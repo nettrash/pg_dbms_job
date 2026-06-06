@@ -1,0 +1,288 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in sync with the Rust version pinned in rust/Dockerfile.
+  RUST_TOOLCHAIN: "1.93.0"
+  # nfpm produces .deb/.rpm/.apk/.pkg.tar.zst from a single config.
+  NFPM_VERSION: "2.40.0"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---------- Linux (glibc) ----------
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            pkg_arch: amd64
+            pkg_formats: "deb,rpm,archlinux"
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            pkg_arch: arm64
+            pkg_formats: "deb,rpm,archlinux"
+
+          # ---------- Linux (musl, for Alpine .apk) ----------
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            pkg_arch: amd64
+            pkg_formats: "apk"
+
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            pkg_arch: arm64
+            pkg_formats: "apk"
+
+          # ---------- macOS ----------
+          # Both targets run on Apple Silicon (macos-latest); the x86_64
+          # build is a cross-compile, which Apple's toolchain handles
+          # natively. macos-13 is no longer in the free GitHub-hosted pool.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            pkg_formats: "macpkg"
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            pkg_formats: "macpkg"
+
+          # ---------- Windows ----------
+          # MSI is built only for x86_64. arm64 Windows users get the .zip
+          # tarball — cargo-wix's default template targets x64, and shipping
+          # a second arch would require a hand-maintained WiX template.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            pkg_formats: "msi"
+
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            archive: zip
+            pkg_formats: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          # Strip leading 'v' for tools (rpm/pkg/msi) that need a numeric version.
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Prepare dist directory
+        shell: bash
+        run: mkdir -p dist
+
+      # ----------------------------------------------------------------
+      # Archive the raw binary (tar.gz on Unix, zip on Windows).
+      # ----------------------------------------------------------------
+      - name: Stage tar.gz
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="pg_dbms_job-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "stage/${name}"
+          cp "rust/target/${{ matrix.target }}/release/pg_dbms_job" "stage/${name}/"
+          cp README.md LICENSE CHANGELOG "stage/${name}/"
+          tar -C stage -czf "dist/${name}.tar.gz" "${name}"
+          shasum -a 256 "dist/${name}.tar.gz" \
+            | awk '{print $1 "  " "'"${name}"'.tar.gz"}' \
+            > "dist/${name}.tar.gz.sha256"
+
+      - name: Stage zip
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "pg_dbms_job-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "stage/$name" | Out-Null
+          Copy-Item "rust/target/${{ matrix.target }}/release/pg_dbms_job.exe" "stage/$name/"
+          Copy-Item README.md, LICENSE, CHANGELOG "stage/$name/"
+          Compress-Archive -Path "stage/$name" -DestinationPath "dist/$name.zip" -Force
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii -FilePath "dist/$name.zip.sha256"
+
+      # ----------------------------------------------------------------
+      # Linux packages via nfpm (deb, rpm, apk, archlinux).
+      # ----------------------------------------------------------------
+      - name: Install nfpm
+        if: contains(matrix.pkg_formats, 'deb') || contains(matrix.pkg_formats, 'apk')
+        shell: bash
+        run: |
+          # Native arch detection for the runner.
+          case "$(uname -m)" in
+            x86_64)  nfpm_arch="x86_64" ;;
+            aarch64) nfpm_arch="arm64"  ;;
+            *) echo "unsupported runner arch: $(uname -m)"; exit 1 ;;
+          esac
+          url="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${nfpm_arch}.tar.gz"
+          curl -sSLf "$url" | sudo tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build nfpm packages
+        if: contains(matrix.pkg_formats, 'deb') || contains(matrix.pkg_formats, 'apk')
+        shell: bash
+        env:
+          PKG_VERSION: ${{ steps.tag.outputs.version }}
+          PKG_ARCH: ${{ matrix.pkg_arch }}
+          PKG_BIN: rust/target/${{ matrix.target }}/release/pg_dbms_job
+        run: |
+          # nfpm expands env vars in only a few top-level fields; contents.src
+          # is not one of them, so render the config with envsubst first.
+          envsubst < packaging/nfpm.yaml > /tmp/nfpm.yaml
+          echo "--- rendered nfpm.yaml ---"
+          cat /tmp/nfpm.yaml
+          echo "--------------------------"
+          IFS=',' read -ra formats <<< "${{ matrix.pkg_formats }}"
+          for fmt in "${formats[@]}"; do
+            case "$fmt" in
+              deb|rpm|apk|archlinux)
+                echo "::group::nfpm $fmt"
+                nfpm pkg --config /tmp/nfpm.yaml --packager "$fmt" --target dist/
+                echo "::endgroup::"
+                ;;
+            esac
+          done
+          # Checksums for every package nfpm produced.
+          cd dist
+          for f in *.deb *.rpm *.apk *.pkg.tar.zst; do
+            [ -e "$f" ] || continue
+            shasum -a 256 "$f" | awk '{print $1 "  " "'"$f"'"}' > "$f.sha256"
+          done
+
+      # ----------------------------------------------------------------
+      # macOS .pkg installer via pkgbuild (drops pg_dbms_job into /usr/local/bin).
+      # ----------------------------------------------------------------
+      - name: Build macOS .pkg
+        if: contains(matrix.pkg_formats, 'macpkg')
+        shell: bash
+        run: |
+          name="pg_dbms_job-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p pkgroot/usr/local/bin
+          cp "rust/target/${{ matrix.target }}/release/pg_dbms_job" pkgroot/usr/local/bin/pg_dbms_job
+          chmod 0755 pkgroot/usr/local/bin/pg_dbms_job
+          pkgbuild \
+            --root pkgroot \
+            --identifier me.nettrash.pg_dbms_job \
+            --version "${{ steps.tag.outputs.version }}" \
+            --install-location / \
+            "dist/${name}.pkg"
+          shasum -a 256 "dist/${name}.pkg" \
+            | awk '{print $1 "  " "'"${name}"'.pkg"}' \
+            > "dist/${name}.pkg.sha256"
+
+      # ----------------------------------------------------------------
+      # Windows MSI via cargo-wix (x86_64 only).
+      # ----------------------------------------------------------------
+      - name: Install cargo-wix
+        if: contains(matrix.pkg_formats, 'msi')
+        shell: pwsh
+        run: cargo install cargo-wix --locked
+
+      - name: Build Windows MSI
+        if: contains(matrix.pkg_formats, 'msi')
+        shell: pwsh
+        run: |
+          $name = "pg_dbms_job-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          Push-Location rust
+          if (-not (Test-Path "wix/main.wxs")) {
+            cargo wix init --force
+          }
+          cargo wix `
+            --target ${{ matrix.target }} `
+            --no-build `
+            --nocapture `
+            --output "..\dist\$name.msi"
+          Pop-Location
+          $hash = (Get-FileHash "dist/$name.msi" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.msi" | Out-File -Encoding ascii -FilePath "dist/$name.msi.sha256"
+
+      # ----------------------------------------------------------------
+      # Upload everything this job produced as a single artifact.
+      # ----------------------------------------------------------------
+      - name: List dist contents
+        shell: bash
+        run: ls -la dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_dbms_job-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List collected assets
+        run: ls -la dist
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: dist/*
+          fail_on_unmatched_files: true

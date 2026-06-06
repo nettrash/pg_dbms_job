@@ -1,0 +1,26 @@
+name: pg_dbms_job
+arch: ${PKG_ARCH}
+version: ${PKG_VERSION}
+release: "1"
+section: database
+priority: optional
+maintainer: nettrash <nettrash@nettrash.me>
+description: |
+  Oracle DBMS_JOB compatibility for PostgreSQL — scheduler daemon.
+  Long-running process that connects to PostgreSQL, listens for job
+  NOTIFY events, and executes queued dbms_job jobs from a connection pool.
+  The matching SQL extension is installed separately via CREATE EXTENSION.
+vendor: nettrash
+homepage: https://github.com/nettrash/pg_dbms_job
+license: MIT
+contents:
+  - src: ${PKG_BIN}
+    dst: /usr/bin/pg_dbms_job
+    file_info:
+      mode: 0755
+  - src: ./README.md
+    dst: /usr/share/doc/pg_dbms_job/README.md
+  - src: ./LICENSE
+    dst: /usr/share/doc/pg_dbms_job/LICENSE
+  - src: ./CHANGELOG
+    dst: /usr/share/doc/pg_dbms_job/CHANGELOG

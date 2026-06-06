@@ -8,6 +8,9 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 authors = ["nettrash <nettrash@nettrash.me>"]
+description = "Oracle DBMS_JOB compatibility for PostgreSQL — scheduler daemon."
+homepage = "https://github.com/nettrash/pg_dbms_job"
+repository = "https://github.com/nettrash/pg_dbms_job"
 
 [dependencies]
 chrono = "0.4"

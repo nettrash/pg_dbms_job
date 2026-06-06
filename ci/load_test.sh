@@ -19,11 +19,12 @@ set -euo pipefail
 
 # ---- tunables --------------------------------------------------------------
 JOBS="${LOAD_TEST_JOBS:-25000}"                 # async jobs submitted in one burst
-JOB_BODY="${LOAD_TEST_JOB_BODY:-PERFORM pg_sleep(0.1);}"  # keeps a worker busy ~100ms
+JOB_BODY="${LOAD_TEST_JOB_BODY:-PERFORM pg_sleep(0.05);}"  # keeps a worker busy ~50ms
 DRAIN_TIMEOUT="${LOAD_TEST_DRAIN_TIMEOUT:-180}"          # seconds allowed to fully drain
 RSS_CEILING_KB="${LOAD_TEST_RSS_CEILING_KB:-524288}"     # 512 MiB peak-RSS ceiling
 POOL_SIZE="${LOAD_TEST_POOL_SIZE:-32}"         # pooled connections == max live workers
 QUEUE_PROCESSES="${LOAD_TEST_QUEUE_PROCESSES:-32}"     # deliberately >> pool_size
+POLL_INTERVAL="${LOAD_TEST_POLL_INTERVAL:-2}"          # seconds between queue-depth samples
 
 BIN="${LOAD_TEST_BIN:-rust/target/release/pg_dbms_job}"
 CONF="${LOAD_TEST_CONF:-/tmp/pg_dbms_job_loadtest.conf}"
@@ -98,6 +99,8 @@ psql -v ON_ERROR_STOP=1 -qX -v job_body="$JOB_BODY" -v njobs="$JOBS" <<'SQL'
 SELECT count(*) AS submitted
 FROM (SELECT dbms_job.submit(:'job_body') FROM generate_series(1, :njobs)) s;
 SQL
+test_submit_ts="$(psql_scalar "SELECT clock_timestamp();")"
+error_logs_before="$(psql_scalar "SELECT count(*) FROM dbms_job.all_scheduler_job_run_details WHERE status <> 'SUCCEEDED';")"
 queued="$(psql_scalar "SELECT count(*) FROM dbms_job.all_async_jobs;")"
 echo "queued before start: $queued"
 [ "$queued" -eq "$JOBS" ] || { echo "FAIL: expected $JOBS queued, found $queued"; exit 1; }
@@ -117,13 +120,33 @@ echo "::endgroup::"
 echo "::group::Drain"
 start="$(date +%s)"
 remaining="$queued"
+completed=0
+samples=0
+peak_remaining="$queued"
+t50="NA"
+t90="NA"
 while :; do
   remaining="$(psql_scalar "SELECT count(*) FROM dbms_job.all_async_jobs;")"
   elapsed=$(( $(date +%s) - start ))
+  completed=$(( JOBS - remaining ))
+  samples=$(( samples + 1 ))
+
+  if [ "$remaining" -gt "$peak_remaining" ]; then
+    peak_remaining="$remaining"
+  fi
+
+  if [ "$t50" = "NA" ] && [ "$completed" -ge $(( JOBS / 2 )) ]; then
+    t50="${elapsed}"
+  fi
+
+  if [ "$t90" = "NA" ] && [ "$completed" -ge $(( JOBS * 9 / 10 )) ]; then
+    t90="${elapsed}"
+  fi
+
   if [ "$remaining" -eq 0 ]; then echo "drained in ${elapsed}s"; break; fi
   if [ "$elapsed" -ge "$DRAIN_TIMEOUT" ]; then echo "TIMEOUT after ${elapsed}s, $remaining jobs left"; break; fi
-  echo "t=${elapsed}s remaining=$remaining"
-  sleep 2
+  echo "t=${elapsed}s remaining=$remaining completed=$completed"
+  sleep "$POLL_INTERVAL"
 done
 drain_secs="$elapsed"
 echo "::endgroup::"
@@ -132,10 +155,32 @@ echo "::endgroup::"
 # now (before we stop the daemon) captures the high-water mark during the burst.
 peak_kb="$(awk '/VmHWM/{print $2}' "/proc/$PID/status" 2>/dev/null || echo 0)"
 
+error_logs_after="$(psql_scalar "SELECT count(*) FROM dbms_job.all_scheduler_job_run_details WHERE status <> 'SUCCEEDED';")"
+error_logs_delta=$(( error_logs_after - error_logs_before ))
+
+if [ "$drain_secs" -gt 0 ]; then
+  throughput_jps="$(awk -v jobs="$completed" -v secs="$drain_secs" 'BEGIN { printf "%.2f", jobs / secs }')"
+else
+  throughput_jps="NA"
+fi
+
+required_throughput_jps="$(awk -v jobs="$JOBS" -v secs="$DRAIN_TIMEOUT" 'BEGIN { if (secs > 0) printf "%.2f", jobs / secs; else printf "NA" }')"
+
+if [ "$JOBS" -gt 0 ]; then
+  drained_pct="$(awk -v done="$completed" -v total="$JOBS" 'BEGIN { printf "%.2f", (done * 100.0) / total }')"
+else
+  drained_pct="NA"
+fi
+
 echo "----------------------------------------------------------------"
 echo "jobs submitted : $JOBS"
 echo "drain time     : ${drain_secs}s (timeout ${DRAIN_TIMEOUT}s)"
+echo "drained        : ${completed}/${JOBS} (${drained_pct}%)"
+echo "throughput     : ${throughput_jps} jobs/s (required ${required_throughput_jps} jobs/s to hit timeout)"
+echo "progress marks : t50=${t50}s t90=${t90}s"
+echo "samples        : ${samples} (interval ${POLL_INTERVAL}s)"
 echo "remaining jobs : $remaining"
+echo "error logs     : +${error_logs_delta} rows in all_scheduler_job_run_details"
 echo "peak RSS       : ${peak_kb} kB (ceiling ${RSS_CEILING_KB} kB)"
 echo "----------------------------------------------------------------"
 
@@ -145,7 +190,12 @@ summary "| metric | value |"
 summary "| --- | --- |"
 summary "| jobs submitted | ${JOBS} |"
 summary "| drain time | ${drain_secs}s / ${DRAIN_TIMEOUT}s |"
+summary "| drained jobs | ${completed}/${JOBS} (${drained_pct}%) |"
+summary "| throughput | ${throughput_jps} jobs/s (required ${required_throughput_jps}) |"
+summary "| progress markers | t50=${t50}s, t90=${t90}s |"
+summary "| queue samples | ${samples} at ${POLL_INTERVAL}s interval |"
 summary "| remaining jobs | ${remaining} |"
+summary "| error log rows delta | ${error_logs_delta} |"
 summary "| peak RSS (VmHWM) | ${peak_kb} kB / ${RSS_CEILING_KB} kB ceiling |"
 
 fail=0

@@ -1,3 +1,5 @@
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed: this crate ships a binary (the scheduler daemon) and
+# the release workflow builds with `--locked` for reproducible builds, which
+# requires the lock file to be present in the checkout.

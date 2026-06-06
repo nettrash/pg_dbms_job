@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented in this file.
 
+## 3.0.2 - 2026-06-05
+
+Scheduler-only release. The SQL schema is unchanged from 3.0.1;
+`ALTER EXTENSION pg_dbms_job UPDATE TO '3.0.2';` only advances the version.
+Restart the scheduler binary to pick up the fix.
+
+### Fixed
+- Bounded the daemon's memory use under heavy asynchronous-job load, where RSS
+  grew with the number of in-flight jobs and was only released once the backlog
+  drained. Three buffers that scaled with load are now capped:
+  - Worker concurrency is limited to the effective connection-pool size
+    (`min(job_queue_processes, pool_size)`) instead of `job_queue_processes`.
+    Previously a burst could spawn up to `job_queue_processes` (default 1024)
+    threads, most of them blocked waiting on the much smaller pool while each
+    held a thread stack.
+  - Worker threads now use a 512 KiB stack instead of the 2 MiB default, since
+    they only drive SQL over a pooled connection.
+  - The log writer's channel is now bounded, so a logging burst (especially
+    debug logging under load) applies backpressure to producers instead of
+    buffering an unbounded queue of pending lines. No log lines are dropped and
+    timestamps remain accurate (lines are stamped at event time before
+    queueing).
+- Lowered the pooled-connection checkout timeout from r2d2's 30 s default to
+  10 s so a momentarily saturated pool can't pin a worker (and its stack) for
+  half a minute. A thread that still fails to spawn leaves the job's dispatch
+  marker set, so the stale-job reaper re-queues it instead of losing work.
+- Made the "worker pool full" backpressure cheap and quiet now that it is
+  reached routinely (the cap equals the pool size rather than the old 1024).
+  The dispatcher polls for a free slot on a short fixed interval instead of
+  sleeping a full `error_delay` each time — the coarse wait would otherwise
+  throttle drain throughput to roughly `pool_size` jobs per `error_delay`. The
+  saturation notice is now emitted at LOG level and rate-limited to once per
+  `error_delay` seconds (shared across both dispatch loops) rather than once per
+  poll, so a sustained backlog no longer floods the log.
+
+### Changed
+- Logging no longer holds the global logger lock across the (now bounded,
+  possibly blocking) channel send. The sender is cloned out under the lock and
+  the send happens lock-free, so a backed-up log writer can't stall other
+  threads' logging — including the main dispatch loop — behind one producer.
+
+### Added
+- Unit tests for the worker-concurrency cap (`effective_max_workers`), the
+  worker-slot backpressure wait (`await_worker_slot`: immediate return below the
+  cap, reaping finished workers, and blocking-then-logging when saturated), the
+  bounded log channel draining a high-volume burst without loss, and
+  compile-time sanity bounds on the new tuning constants.
+- A CI load test (`ci/load_test.sh`, wired into the `Async load test` workflow
+  job) that runs the real daemon against a live PostgreSQL, submits a burst of
+  asynchronous jobs, and asserts the queue fully drains and the daemon's peak
+  RSS stays under a ceiling — a regression guard for the bounded-memory work. It
+  runs on the default branch, on manual dispatch, or on PRs labelled
+  `load-test`, so normal PR CI stays fast.
+
 ## 3.0.1 - 2026-06-01
 
 Scheduler-only release. The SQL schema is unchanged from 3.0.0;

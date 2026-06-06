@@ -1,5 +1,6 @@
 //! Job discovery and execution logic.
 
+use crate::constants::WORKER_STACK_SIZE;
 use crate::db::{JobPool, get_job_connection, reset_job_connection};
 use crate::dlog;
 use crate::logging::dprint;
@@ -194,13 +195,29 @@ pub fn spawn_job(
     let config_clone = Arc::clone(config);
     let stats_clone = Arc::clone(stats);
 
-    let handle = std::thread::spawn(move || {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_job(kind, job, &pool_clone, &config_clone, &stats_clone);
-        }));
-    });
+    // Workers only drive SQL over a pooled connection, so a small stack is
+    // plenty; the default 2 MiB per thread is what made a burst of in-flight
+    // jobs balloon RSS. See `WORKER_STACK_SIZE`.
+    let spawn_result = std::thread::Builder::new()
+        .name(format!("job-{}", job.job))
+        .stack_size(WORKER_STACK_SIZE)
+        .spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_job(kind, job, &pool_clone, &config_clone, &stats_clone);
+            }));
+        });
 
-    running_workers.insert(worker_id, handle);
+    match spawn_result {
+        Ok(handle) => {
+            running_workers.insert(worker_id, handle);
+        }
+        Err(err) => {
+            // The dispatch UPDATE already set this_date on the row; leaving it
+            // set means the stale-job reaper re-queues it later, so a transient
+            // thread-spawn failure (e.g. resource exhaustion) doesn't lose work.
+            dlog!(config, "ERROR", "failed to spawn worker thread: {err}");
+        }
+    }
 }
 
 /// Execute a job (async or scheduled) on a pooled connection.

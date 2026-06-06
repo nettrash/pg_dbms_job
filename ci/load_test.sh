@@ -89,8 +89,8 @@ echo "::group::Submit $JOBS async jobs"
 # Submit the whole burst BEFORE starting the daemon: on startup the scheduler
 # does a full table scan, so it picks up the entire backlog at once — the
 # heaviest memory path (it materialises every queued row in one fetch).
-psql -v ON_ERROR_STOP=1 -qX -c \
-  "SELECT count(*) AS submitted FROM (SELECT dbms_job.submit('${JOB_BODY}') FROM generate_series(1, ${JOBS})) s;"
+psql -v ON_ERROR_STOP=1 -qX -v job_body="$JOB_BODY" -c \
+  "SELECT count(*) AS submitted FROM (SELECT dbms_job.submit(:'job_body') FROM generate_series(1, ${JOBS})) s;"
 queued="$(psql_scalar "SELECT count(*) FROM dbms_job.all_async_jobs;")"
 echo "queued before start: $queued"
 [ "$queued" -eq "$JOBS" ] || { echo "FAIL: expected $JOBS queued, found $queued"; exit 1; }

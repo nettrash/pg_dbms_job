@@ -89,8 +89,15 @@ echo "::group::Submit $JOBS async jobs"
 # Submit the whole burst BEFORE starting the daemon: on startup the scheduler
 # does a full table scan, so it picks up the entire backlog at once — the
 # heaviest memory path (it materialises every queued row in one fetch).
-psql -v ON_ERROR_STOP=1 -qX -v job_body="$JOB_BODY" -c \
-  "SELECT count(*) AS submitted FROM (SELECT dbms_job.submit(:'job_body') FROM generate_series(1, ${JOBS})) s;"
+# Feed the query on stdin, NOT via -c: psql only performs :'var' variable
+# interpolation when reading from stdin or -f, never on a -c command string, so
+# a -c form would send the literal :'job_body' to the server and fail with a
+# syntax error at ":". The quoted heredoc delimiter keeps the shell out of it;
+# the job count is passed as a psql var too.
+psql -v ON_ERROR_STOP=1 -qX -v job_body="$JOB_BODY" -v njobs="$JOBS" <<'SQL'
+SELECT count(*) AS submitted
+FROM (SELECT dbms_job.submit(:'job_body') FROM generate_series(1, :njobs)) s;
+SQL
 queued="$(psql_scalar "SELECT count(*) FROM dbms_job.all_async_jobs;")"
 echo "queued before start: $queued"
 [ "$queued" -eq "$JOBS" ] || { echo "FAIL: expected $JOBS queued, found $queued"; exit 1; }

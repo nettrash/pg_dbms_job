@@ -5,6 +5,7 @@
 //! per batch.  This avoids per-line open/close syscalls and eliminates
 //! interleaved output from concurrent worker threads.
 
+use crate::constants::LOG_CHANNEL_CAPACITY;
 use crate::model::Config;
 use chrono::Local;
 use std::fs::{self, OpenOptions};
@@ -40,7 +41,7 @@ enum LogCmd {
 /// comparing `pid` against `process::id()` and respawn when they differ.
 struct LoggerState {
     pid: u32,
-    tx: mpsc::Sender<LogCmd>,
+    tx: mpsc::SyncSender<LogCmd>,
 }
 
 static LOG_STATE: Mutex<Option<LoggerState>> = Mutex::new(None);
@@ -52,32 +53,49 @@ static LOG_STATE: Mutex<Option<LoggerState>> = Mutex::new(None);
 /// exhaustion, ulimit, post-fork failure). Callers must treat that case as a
 /// signal to write to stderr directly rather than panicking — losing logs is
 /// recoverable; killing the scheduler is not.
-fn with_sender<R>(f: impl FnOnce(&mpsc::Sender<LogCmd>) -> R) -> Option<R> {
-    let mut guard = match LOG_STATE.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let my_pid = process::id();
-    let need_spawn = match guard.as_ref() {
-        None => true,
-        Some(state) => state.pid != my_pid,
-    };
-    if need_spawn {
-        let (tx, rx) = mpsc::channel();
-        match std::thread::Builder::new()
-            .name("logger".into())
-            .spawn(move || log_writer_thread(rx))
-        {
-            Ok(_) => {
-                *guard = Some(LoggerState { pid: my_pid, tx });
-            }
-            Err(err) => {
-                eprintln!("ERROR: failed to spawn logger thread ({err}); falling back to stderr");
-                return None;
+fn with_sender<R>(f: impl FnOnce(&mpsc::SyncSender<LogCmd>) -> R) -> Option<R> {
+    // Clone the sender out under the lock, then RELEASE the lock before calling
+    // `f`. `f` typically does a `send` on the now-bounded channel, which BLOCKS
+    // when the buffer is full. Holding the global `LOG_STATE` mutex across that
+    // blocking send would serialise every other thread's logging behind one
+    // backed-up producer (a lock convoy that could stall the main dispatch loop
+    // under a logging burst). `SyncSender` is cheap to clone (an Arc bump) and
+    // safe to use from multiple producers, so we pay one clone to keep the
+    // critical section short and send lock-free.
+    let sender = {
+        let mut guard = match LOG_STATE.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let my_pid = process::id();
+        let need_spawn = match guard.as_ref() {
+            None => true,
+            Some(state) => state.pid != my_pid,
+        };
+        if need_spawn {
+            // Bounded so a logging burst applies backpressure to producers
+            // rather than buffering unbounded — under heavy async load with
+            // debug logging this queue was a primary driver of load-correlated
+            // memory growth.
+            let (tx, rx) = mpsc::sync_channel(LOG_CHANNEL_CAPACITY);
+            match std::thread::Builder::new()
+                .name("logger".into())
+                .spawn(move || log_writer_thread(rx))
+            {
+                Ok(_) => {
+                    *guard = Some(LoggerState { pid: my_pid, tx });
+                }
+                Err(err) => {
+                    eprintln!(
+                        "ERROR: failed to spawn logger thread ({err}); falling back to stderr"
+                    );
+                    return None;
+                }
             }
         }
-    }
-    guard.as_ref().map(|s| f(&s.tx))
+        guard.as_ref().map(|s| s.tx.clone())
+    };
+    sender.as_ref().map(f)
 }
 
 /// Drop any sender inherited from a parent process. Call this in the child
@@ -385,6 +403,29 @@ mod tests {
         flush_logger();
         let content = fs::read_to_string(&path).expect("read log file");
         assert!(content.contains("test message"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bounded_channel_drains_high_volume_without_loss() {
+        // Send well past LOG_CHANNEL_CAPACITY so the bounded sync_channel is
+        // forced to apply backpressure (send blocks until the writer drains).
+        // The writer runs concurrently, so this must neither deadlock nor drop
+        // lines: every message sent has to land in the file.
+        use crate::constants::LOG_CHANNEL_CAPACITY;
+        let path = temp_log_path();
+        let config = test_config(&path, false);
+        let count = LOG_CHANNEL_CAPACITY + 5000;
+        for i in 0..count {
+            dprint(&config, "LOG", &format!("bulk message {i}"));
+        }
+        flush_logger();
+        let content = fs::read_to_string(&path).expect("read log file");
+        let lines = content
+            .lines()
+            .filter(|l| l.contains("bulk message"))
+            .count();
+        assert_eq!(lines, count, "bounded channel must not drop log lines");
         let _ = fs::remove_file(path);
     }
 

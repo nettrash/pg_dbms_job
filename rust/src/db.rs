@@ -1,11 +1,13 @@
 //! Database connection helpers.
 
+use crate::constants::POOL_CONNECTION_TIMEOUT_SECS;
 use crate::logging::dprint;
 use crate::model::{Config, DbInfo};
 use crate::util::die;
 use postgres::{Client, NoTls};
 use r2d2_postgres::PostgresConnectionManager;
 use std::fmt;
+use std::time::Duration;
 
 pub type JobPool = r2d2::Pool<PostgresConnectionManager<NoTls>>;
 pub type PooledJobClient = r2d2::PooledConnection<PostgresConnectionManager<NoTls>>;
@@ -81,6 +83,7 @@ pub fn create_job_pool(dbinfo: &DbInfo, pool_size: u32) -> Result<JobPool, Strin
     r2d2::Pool::builder()
         .max_size(pool_size)
         .min_idle(Some(0))
+        .connection_timeout(Duration::from_secs(POOL_CONNECTION_TIMEOUT_SECS))
         .build(manager)
         .map_err(|e| e.to_string())
 }

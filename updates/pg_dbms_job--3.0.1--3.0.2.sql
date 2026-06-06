@@ -1,0 +1,14 @@
+----
+-- Upgrade pg_dbms_job from 3.0.1 to 3.0.2.
+--
+-- Run with: ALTER EXTENSION pg_dbms_job UPDATE TO '3.0.2';
+--
+-- 3.0.2 is a scheduler-only release: it bounds the Rust daemon's memory use
+-- under heavy asynchronous-job load. Worker concurrency is now capped at the
+-- effective connection-pool size (instead of job_queue_processes), worker
+-- threads use a small stack, and the log writer's channel is bounded so a
+-- logging burst applies backpressure instead of growing without limit. The SQL
+-- schema is unchanged from 3.0.1, so this migration intentionally does nothing
+-- but advance the extension version. Restart the scheduler binary to pick up
+-- the fix.
+----

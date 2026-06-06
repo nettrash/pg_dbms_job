@@ -65,18 +65,9 @@ jobs:
             pkg_formats: "macpkg"
 
           # ---------- Windows ----------
-          # MSI is built only for x86_64. arm64 Windows users get the .zip
-          # tarball — cargo-wix's default template targets x64, and shipping
-          # a second arch would require a hand-maintained WiX template.
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-            pkg_formats: "msi"
-
-          - target: aarch64-pc-windows-msvc
-            os: windows-11-arm
-            archive: zip
-            pkg_formats: ""
+          # Intentionally omitted: pg_dbms_job is a POSIX daemon (fork/setsid/
+          # dup2, POSIX signals, MetadataExt dev/ino for log rotation) and does
+          # not compile on Windows. Supported targets are Linux and macOS only.
 
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +98,7 @@ jobs:
             tag="${GITHUB_REF_NAME}"
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          # Strip leading 'v' for tools (rpm/pkg/msi) that need a numeric version.
+          # Strip leading 'v' for tools (rpm/pkg) that need a numeric version.
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build
@@ -119,7 +110,7 @@ jobs:
         run: mkdir -p dist
 
       # ----------------------------------------------------------------
-      # Archive the raw binary (tar.gz on Unix, zip on Windows).
+      # Archive the raw binary (tar.gz; all supported targets are Unix).
       # ----------------------------------------------------------------
       - name: Stage tar.gz
         if: matrix.archive == 'tar.gz'
@@ -133,18 +124,6 @@ jobs:
           shasum -a 256 "dist/${name}.tar.gz" \
             | awk '{print $1 "  " "'"${name}"'.tar.gz"}' \
             > "dist/${name}.tar.gz.sha256"
-
-      - name: Stage zip
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $name = "pg_dbms_job-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force -Path "stage/$name" | Out-Null
-          Copy-Item "rust/target/${{ matrix.target }}/release/pg_dbms_job.exe" "stage/$name/"
-          Copy-Item README.md, LICENSE, CHANGELOG "stage/$name/"
-          Compress-Archive -Path "stage/$name" -DestinationPath "dist/$name.zip" -Force
-          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii -FilePath "dist/$name.zip.sha256"
 
       # ----------------------------------------------------------------
       # Linux packages via nfpm (deb, rpm, apk, archlinux).
@@ -214,32 +193,6 @@ jobs:
           shasum -a 256 "dist/${name}.pkg" \
             | awk '{print $1 "  " "'"${name}"'.pkg"}' \
             > "dist/${name}.pkg.sha256"
-
-      # ----------------------------------------------------------------
-      # Windows MSI via cargo-wix (x86_64 only).
-      # ----------------------------------------------------------------
-      - name: Install cargo-wix
-        if: contains(matrix.pkg_formats, 'msi')
-        shell: pwsh
-        run: cargo install cargo-wix --locked
-
-      - name: Build Windows MSI
-        if: contains(matrix.pkg_formats, 'msi')
-        shell: pwsh
-        run: |
-          $name = "pg_dbms_job-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
-          Push-Location rust
-          if (-not (Test-Path "wix/main.wxs")) {
-            cargo wix init --force
-          }
-          cargo wix `
-            --target ${{ matrix.target }} `
-            --no-build `
-            --nocapture `
-            --output "..\dist\$name.msi"
-          Pop-Location
-          $hash = (Get-FileHash "dist/$name.msi" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.msi" | Out-File -Encoding ascii -FilePath "dist/$name.msi.sha256"
 
       # ----------------------------------------------------------------
       # Upload everything this job produced as a single artifact.

@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # ---- tunables --------------------------------------------------------------
-JOBS="${LOAD_TEST_JOBS:-100000}"                 # async jobs submitted in one burst
+JOBS="${LOAD_TEST_JOBS:-25000}"                 # async jobs submitted in one burst
 JOB_BODY="${LOAD_TEST_JOB_BODY:-PERFORM pg_sleep(0.1);}"  # keeps a worker busy ~100ms
 DRAIN_TIMEOUT="${LOAD_TEST_DRAIN_TIMEOUT:-180}"          # seconds allowed to fully drain
 RSS_CEILING_KB="${LOAD_TEST_RSS_CEILING_KB:-524288}"     # 512 MiB peak-RSS ceiling

@@ -218,7 +218,7 @@ CREATE PROCEDURE dbms_job.broken(
 BEGIN
     -- interval must be in the future
     IF next_date < current_timestamp THEN
-        RAISE EXCEPTION 'next_val must be a time in the future: %', next_date USING ERRCODE = '23420';
+        RAISE EXCEPTION 'next_date must be a time in the future: %', next_date USING ERRCODE = '23420';
     END IF;
     UPDATE dbms_job.all_scheduled_jobs SET broken=$2,next_date=$3 WHERE job=$1;
     IF NOT FOUND THEN

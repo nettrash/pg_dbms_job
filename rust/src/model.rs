@@ -35,6 +35,31 @@ pub struct Config {
     /// with no live worker backend is treated as abandoned and re-queued by
     /// the reaper. `0` disables reaping.
     pub stale_job_timeout: f64,
+    /// Per-job `statement_timeout` (seconds) applied inside each job's
+    /// transaction via `SET LOCAL`. Bounds how long a single job body can run
+    /// before PostgreSQL cancels it, so one slow/hung job cannot hold a worker
+    /// slot and pooled connection indefinitely. `0` disables (no timeout).
+    pub statement_timeout: f64,
+    /// Per-job `idle_in_transaction_session_timeout` (seconds) applied inside
+    /// each job's transaction via `SET LOCAL`. Bounds how long a job may sit
+    /// idle mid-transaction before the backend is terminated. `0` disables.
+    pub idle_in_transaction_timeout: f64,
+    /// Allow more than one scheduler to run against the same database
+    /// (horizontal scale-out). When `false` (default) a second instance aborts
+    /// on startup — the historical single-instance safety guard. Setting it
+    /// `true` relies on the `FOR UPDATE SKIP LOCKED` job claim to keep
+    /// concurrent schedulers from executing the same job twice.
+    pub allow_concurrent_schedulers: bool,
+    /// Whether the scheduler uses LISTEN/NOTIFY to be woken promptly when a job
+    /// is submitted. When `true` (default) the daemon `LISTEN`s on the two
+    /// notify channels and a fresh submit is picked up within `nap_time`. When
+    /// `false` the daemon does not `LISTEN` at all and relies purely on the
+    /// `job_queue_interval` poll: dispatch latency then equals the poll interval,
+    /// but submitters no longer pay `pg_notify`'s cluster-wide commit-time
+    /// serialization and a saturated scheduler can never back-pressure the shared
+    /// notify queue. For a fully NOTIFY-free deployment also drop the notify
+    /// triggers (`CALL dbms_job.set_notify(false)`) so submits stop emitting.
+    pub enable_notify: bool,
 }
 
 /// Controls how much job-execution history is written to
@@ -226,6 +251,10 @@ mod tests {
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         assert!(config.debug);
         assert_eq!(config.pidfile, "/tmp/test.pid");
@@ -265,6 +294,10 @@ mod tests {
             stats_interval: 30,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let cloned = config.clone();
         assert_eq!(cloned.pidfile, config.pidfile);

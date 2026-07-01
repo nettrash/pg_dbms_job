@@ -21,11 +21,17 @@ pub fn get_scheduled_jobs(
     config: &Config,
     config_invalidated: &mut bool,
     jobs: &mut HashMap<i64, Job>,
+    limit: i64,
 ) {
     dprint(config, "DEBUG", "Get scheduled jobs to run");
     jobs.clear();
-    let query = "UPDATE dbms_job.all_scheduled_jobs SET this_date = current_timestamp, next_date = dbms_job.get_next_date(interval), instance = instance+1 WHERE interval IS NOT NULL AND NOT broken AND this_date IS NULL AND next_date <= current_timestamp RETURNING job, what, log_user, schema_user";
-    match client.query(query, &[]) {
+    // Claim at most `limit` (one worker-pool's worth) due rows per cycle rather
+    // than the whole backlog: this bounds the in-memory claimed set and the
+    // number of rows left flagged running if the daemon dies mid-drain. The
+    // inner SELECT ... FOR UPDATE SKIP LOCKED also makes the claim safe for
+    // multiple concurrent schedulers (a future scale-out).
+    let query = "UPDATE dbms_job.all_scheduled_jobs AS j SET this_date = current_timestamp, next_date = dbms_job.get_next_date(j.interval), instance = j.instance+1 WHERE j.job IN (SELECT s.job FROM dbms_job.all_scheduled_jobs s WHERE s.interval IS NOT NULL AND NOT s.broken AND s.this_date IS NULL AND s.next_date <= current_timestamp ORDER BY s.next_date LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING j.job, j.what, j.log_user, j.schema_user";
+    match client.query(query, &[&limit]) {
         Ok(rows) => {
             for row in rows {
                 let job = Job {
@@ -53,10 +59,16 @@ pub fn get_scheduled_jobs(
 /// Collect asynchronous jobs queued for execution.
 ///
 /// Clears and refills `jobs` in place to reuse the existing allocation.
-pub fn get_async_jobs(client: &mut Client, config: &Config, jobs: &mut HashMap<i64, Job>) {
+pub fn get_async_jobs(
+    client: &mut Client,
+    config: &Config,
+    jobs: &mut HashMap<i64, Job>,
+    limit: i64,
+) {
     jobs.clear();
-    let query = "UPDATE dbms_job.all_async_jobs SET this_date = current_timestamp WHERE this_date IS NULL RETURNING job, what, log_user, schema_user";
-    if let Ok(rows) = client.query(query, &[]) {
+    // Bounded, SKIP LOCKED claim — see get_scheduled_jobs for the rationale.
+    let query = "UPDATE dbms_job.all_async_jobs AS j SET this_date = current_timestamp WHERE j.job IN (SELECT a.job FROM dbms_job.all_async_jobs a WHERE a.this_date IS NULL ORDER BY a.job LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING j.job, j.what, j.log_user, j.schema_user";
+    if let Ok(rows) = client.query(query, &[&limit]) {
         for row in rows {
             let job = Job {
                 job: row.get::<_, i64>("job"),
@@ -70,8 +82,8 @@ pub fn get_async_jobs(client: &mut Client, config: &Config, jobs: &mut HashMap<i
         dprint(config, "ERROR", "can't execute statement");
     }
 
-    let query = "UPDATE dbms_job.all_scheduled_jobs SET this_date = current_timestamp WHERE this_date IS NULL AND interval IS NULL AND next_date <= current_timestamp RETURNING job, what, log_user, schema_user";
-    if let Ok(rows) = client.query(query, &[]) {
+    let query = "UPDATE dbms_job.all_scheduled_jobs AS j SET this_date = current_timestamp WHERE j.job IN (SELECT s.job FROM dbms_job.all_scheduled_jobs s WHERE s.this_date IS NULL AND s.interval IS NULL AND s.next_date <= current_timestamp ORDER BY s.next_date LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING j.job, j.what, j.log_user, j.schema_user";
+    if let Ok(rows) = client.query(query, &[&limit]) {
         for row in rows {
             let job = Job {
                 job: row.get::<_, i64>("job"),
@@ -113,6 +125,26 @@ pub fn delete_job(client: &mut Client, config: &Config, jobid: i64) {
             &[&jobid],
         );
     }
+}
+
+/// Delete a successfully-run async job's row as part of the *current*
+/// transaction (so it commits atomically with the job body), returning any
+/// database error so the caller can roll the whole job back. Mirrors
+/// [`delete_job`]'s two-table lookup: async jobs live in `all_async_jobs`, but a
+/// one-shot scheduled row (`interval IS NULL`) is dispatched as async too and
+/// lives in `all_scheduled_jobs`.
+fn delete_completed_async(client: &mut Client, jobid: i64) -> Result<(), postgres::Error> {
+    let n = client.execute(
+        "DELETE FROM dbms_job.all_async_jobs WHERE job = $1",
+        &[&jobid],
+    )?;
+    if n == 0 {
+        client.execute(
+            "DELETE FROM dbms_job.all_scheduled_jobs WHERE job = $1",
+            &[&jobid],
+        )?;
+    }
+    Ok(())
 }
 
 /// Re-queue jobs left flagged running by workers that never finished.
@@ -252,44 +284,32 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
 
     dlog!(config, "DEBUG", "connected to database for job {}", job.job);
 
-    if let Some(log_user) = &job.log_user {
-        let quoted = quote_ident(log_user);
-        dlog!(config, "DEBUG", "SET ROLE {quoted}");
-        if let Err(err) = client.batch_execute(&format!("SET ROLE {quoted}")) {
-            dlog!(config, "ERROR", "can not change role, reason: {err}");
-            return;
-        }
-    } else {
-        dprint(config, "DEBUG", "log_user is not set, using default role");
-    }
-
-    dprint(config, "DEBUG", "BEGIN");
-    if let Err(err) = client.batch_execute("BEGIN") {
+    // Fold the whole per-job setup — optional SET ROLE, BEGIN, the per-job
+    // timeout guards, and the optional SET LOCAL search_path — into a single
+    // round-trip instead of up to four. At high job rates these fixed
+    // per-job round-trips dominate, so collapsing them raises the short-job
+    // ceiling. It is also all-or-nothing: if any part fails the job body is not
+    // run, matching the previous behaviour.
+    let setup = build_setup_stmt(
+        config.statement_timeout,
+        config.idle_in_transaction_timeout,
+        job.log_user.as_deref(),
+        job.schema_user.as_deref(),
+    );
+    dprint(config, "DEBUG", &setup);
+    if let Err(err) = client.batch_execute(&setup) {
         dlog!(
             config,
             "ERROR",
-            "can not start a transaction, reason: {err}"
+            "job {} setup (role/begin/search_path) failed, reason: {}",
+            job.job,
+            err
         );
+        // A partial setup can leave the pooled connection in an aborted
+        // transaction and/or with SET ROLE still active; clean it before the
+        // connection returns to the pool so it does not poison the next job.
+        let _ = client.batch_execute("ROLLBACK; RESET ROLE; RESET search_path");
         return;
-    }
-
-    if let Some(schema_user) = &job.schema_user {
-        let quoted_path = quote_search_path(schema_user);
-        dlog!(config, "DEBUG", "SET LOCAL search_path TO {quoted_path}");
-        if let Err(err) = client.batch_execute(&format!("SET LOCAL search_path TO {quoted_path}")) {
-            dlog!(
-                config,
-                "ERROR",
-                "can not change the search_path, reason: {err}"
-            );
-            return;
-        }
-    } else {
-        dprint(
-            config,
-            "DEBUG",
-            "schema_user is not set, using default search_path",
-        );
     }
 
     let mut status_text = String::new();
@@ -302,6 +322,7 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
     dprint(config, "DEBUG", &code);
 
     let exec_result = client.batch_execute(&code);
+    let duration_secs = t0.elapsed().as_secs() as i64;
 
     if let Err(err) = exec_result {
         err_text = err.to_string();
@@ -321,55 +342,71 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
                 "ERROR",
                 "can not rollback a transaction, reason: {err}"
             );
-        } else if matches!(kind, JobKind::Scheduled) {
-            // The DO-block failed inside a transaction we own, so the
-            // scheduled row's `this_date` is still set from the dispatch
-            // UPDATE. Clear it and bump `failures` so the row is eligible
-            // for the next attempt.
-            if let Err(err) = client.execute(
-                "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, failures = failures+1 WHERE job = $1",
-                &[&job.job],
-            ) {
-                dlog!(
-                    config,
-                    "ERROR",
-                    "failed to record failure for scheduled job {}: {}",
-                    job.job,
-                    err
-                );
+        } else {
+            match kind {
+                // Scheduled: the row's `this_date` is still set from dispatch;
+                // clear it and bump `failures` so the row retries.
+                JobKind::Scheduled => {
+                    if let Err(err) = client.execute(
+                        "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, failures = failures+1 WHERE job = $1",
+                        &[&job.job],
+                    ) {
+                        dlog!(
+                            config,
+                            "ERROR",
+                            "failed to record failure for scheduled job {}: {}",
+                            job.job,
+                            err
+                        );
+                    }
+                }
+                // Async is one-shot: remove it from the queue regardless of
+                // outcome so it is not retried.
+                JobKind::Async => delete_job(&mut client, config, job.job),
             }
         }
     } else {
-        dprint(config, "DEBUG", "COMMIT");
-        if let Err(err) = client.batch_execute("COMMIT") {
-            dlog!(
-                config,
-                "ERROR",
-                "can not commit a transaction, reason: {err}"
-            );
-        } else if matches!(kind, JobKind::Scheduled) {
-            let duration_secs = t0.elapsed().as_secs() as i64;
-            if let Err(err) = client.execute(
-                "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, last_date = current_timestamp, total_time = ($1 || ' seconds')::interval, failures = 0, instance = instance+1 WHERE job = $2",
-                &[&duration_secs.to_string(), &job.job],
-            ) {
+        // Body succeeded. Fold the completion bookkeeping into THIS transaction
+        // so the mark-done commits atomically with the job's effects: a crash
+        // between the body's commit and the mark can no longer leave a job that
+        // committed its work yet gets re-run by the reaper. (Effects OUTSIDE the
+        // database transaction remain at-least-once by nature.)
+        let completion = match kind {
+            JobKind::Scheduled => client
+                .execute(
+                    "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, last_date = current_timestamp, total_time = ($1 || ' seconds')::interval, failures = 0, instance = instance+1 WHERE job = $2",
+                    &[&duration_secs.to_string(), &job.job],
+                )
+                .map(|_| ()),
+            JobKind::Async => delete_completed_async(&mut client, job.job),
+        };
+        match completion {
+            Ok(()) => {
+                dprint(config, "DEBUG", "COMMIT");
+                if let Err(err) = client.batch_execute("COMMIT") {
+                    // The whole transaction (body + completion) rolls back, so
+                    // the row keeps its marker and the reaper re-runs it later.
+                    dlog!(
+                        config,
+                        "ERROR",
+                        "can not commit a transaction, reason: {err}"
+                    );
+                }
+            }
+            Err(err) => {
                 dlog!(
                     config,
                     "ERROR",
-                    "failed to record success for scheduled job {}: {}",
+                    "failed to record completion for job {}, rolling back: {}",
                     job.job,
                     err
                 );
+                let _ = client.batch_execute("ROLLBACK");
+                status_text = "ERROR".to_string();
+                err_text = format!("completion bookkeeping failed: {err}");
             }
         }
     }
-
-    if matches!(kind, JobKind::Async) {
-        dprint(config, "DEBUG", "delete job");
-        delete_job(&mut client, config, job.job);
-    }
-
-    let duration_secs = t0.elapsed().as_secs() as i64;
     // `status_text` is "ERROR" only when the job failed; empty on success.
     let failed = !status_text.is_empty();
     let record_details = match config.job_run_details {
@@ -511,6 +548,57 @@ fn store_job_execution_details(
     }
 }
 
+/// Build the transaction-opening statement for a job, folding the per-job
+/// `statement_timeout` / `idle_in_transaction_session_timeout` guards into the
+/// same round-trip as `BEGIN` via `SET LOCAL` (so they auto-reset at
+/// COMMIT/ROLLBACK). A value of `0` leaves the corresponding timeout unset
+/// (unlimited), preserving the historical behaviour. Bounding these is what
+/// stops a single slow/hung job body from pinning a worker slot and pooled
+/// connection indefinitely under load.
+fn build_begin_stmt(statement_timeout: f64, idle_in_transaction_timeout: f64) -> String {
+    let mut stmt = String::from("BEGIN");
+    if statement_timeout > 0.0 {
+        let ms = (statement_timeout * 1000.0).round() as i64;
+        stmt.push_str(&format!("; SET LOCAL statement_timeout = {ms}"));
+    }
+    if idle_in_transaction_timeout > 0.0 {
+        let ms = (idle_in_transaction_timeout * 1000.0).round() as i64;
+        stmt.push_str(&format!(
+            "; SET LOCAL idle_in_transaction_session_timeout = {ms}"
+        ));
+    }
+    stmt
+}
+
+/// Build the combined per-job setup statement executed in one round-trip:
+/// optional session `SET ROLE`, then `BEGIN` with the per-job timeout guards
+/// (see [`build_begin_stmt`]), then the optional transaction-local
+/// `SET LOCAL search_path`. `SET ROLE` stays before `BEGIN` so it is
+/// session-level (undone by `reset_job_connection`), preserving the original
+/// ordering; `search_path` is `SET LOCAL` so it is scoped to the transaction.
+fn build_setup_stmt(
+    statement_timeout: f64,
+    idle_in_transaction_timeout: f64,
+    log_user: Option<&str>,
+    schema_user: Option<&str>,
+) -> String {
+    let mut stmt = String::new();
+    if let Some(user) = log_user {
+        stmt.push_str(&format!("SET ROLE {}; ", quote_ident(user)));
+    }
+    stmt.push_str(&build_begin_stmt(
+        statement_timeout,
+        idle_in_transaction_timeout,
+    ));
+    if let Some(schema) = schema_user {
+        stmt.push_str(&format!(
+            "; SET LOCAL search_path TO {}",
+            quote_search_path(schema)
+        ));
+    }
+    stmt
+}
+
 /// Build a DO block wrapper for the job body.
 fn build_do_block(jobid: i64, what: &str) -> String {
     format!(
@@ -520,7 +608,82 @@ fn build_do_block(jobid: i64, what: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_do_block, quote_ident, quote_search_path};
+    use super::{
+        build_begin_stmt, build_do_block, build_setup_stmt, quote_ident, quote_search_path,
+    };
+
+    #[test]
+    fn build_setup_stmt_no_role_no_schema_is_just_begin() {
+        // With neither role nor schema and no timeouts it collapses to BEGIN.
+        assert_eq!(build_setup_stmt(0.0, 0.0, None, None), "BEGIN");
+    }
+
+    #[test]
+    fn build_setup_stmt_role_and_schema_and_timeout() {
+        // SET ROLE stays before BEGIN (session-level); search_path is SET LOCAL
+        // after BEGIN (transaction-scoped); the timeout guard sits inside.
+        assert_eq!(
+            build_setup_stmt(30.0, 0.0, Some("bob"), Some("app, public")),
+            "SET ROLE \"bob\"; BEGIN; SET LOCAL statement_timeout = 30000; SET LOCAL search_path TO \"app\", \"public\""
+        );
+    }
+
+    #[test]
+    fn build_setup_stmt_quotes_role_defensively() {
+        // A hostile role name cannot break out of the identifier quoting.
+        let s = build_setup_stmt(0.0, 0.0, Some("a\"; DROP ROLE x; --"), None);
+        assert_eq!(s, "SET ROLE \"a\"\"; DROP ROLE x; --\"; BEGIN");
+    }
+
+    #[test]
+    fn build_setup_stmt_schema_only_uses_set_local() {
+        assert_eq!(
+            build_setup_stmt(0.0, 0.0, None, Some("public")),
+            "BEGIN; SET LOCAL search_path TO \"public\""
+        );
+    }
+
+    #[test]
+    fn build_begin_stmt_no_timeouts_is_plain_begin() {
+        // 0 means "unset" — preserve the historical unlimited behaviour and the
+        // single-statement BEGIN (no extra round-trip cost).
+        assert_eq!(build_begin_stmt(0.0, 0.0), "BEGIN");
+    }
+
+    #[test]
+    fn build_begin_stmt_statement_timeout_only() {
+        // Seconds are converted to whole milliseconds for the GUC.
+        assert_eq!(
+            build_begin_stmt(30.0, 0.0),
+            "BEGIN; SET LOCAL statement_timeout = 30000"
+        );
+    }
+
+    #[test]
+    fn build_begin_stmt_idle_timeout_only() {
+        assert_eq!(
+            build_begin_stmt(0.0, 1.5),
+            "BEGIN; SET LOCAL idle_in_transaction_session_timeout = 1500"
+        );
+    }
+
+    #[test]
+    fn build_begin_stmt_both_timeouts() {
+        assert_eq!(
+            build_begin_stmt(30.0, 60.0),
+            "BEGIN; SET LOCAL statement_timeout = 30000; SET LOCAL idle_in_transaction_session_timeout = 60000"
+        );
+    }
+
+    #[test]
+    fn build_begin_stmt_rounds_fractional_millis() {
+        // 0.0015 s = 1.5 ms rounds to 2 ms; sub-millisecond values still produce
+        // a valid integer GUC value rather than a float.
+        assert_eq!(
+            build_begin_stmt(0.0015, 0.0),
+            "BEGIN; SET LOCAL statement_timeout = 2"
+        );
+    }
 
     #[test]
     fn build_do_block_includes_job_and_code() {

@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented in this file.
 
+## 3.2.0 - 2026-07-01
+
+Optional pure-polling mode. The scheduler can now run without LISTEN/NOTIFY,
+trading a small amount of dispatch latency for the removal of `pg_notify`'s
+per-submit cost. Run `ALTER EXTENSION pg_dbms_job UPDATE TO '3.2.0';` and
+restart the scheduler binary. Existing behaviour is unchanged by default
+(NOTIFY stays on).
+
+### Added
+- **`enable_notify` daemon setting** (default `1`/on). When set to `0` the
+  scheduler does not `LISTEN` and dispatches purely on the `job_queue_interval`
+  poll. Submitters then never emit `pg_notify`, so they no longer pay its
+  cluster-wide commit-time serialization (a heavyweight lock on database 0 held
+  until commit), and a saturated scheduler that stops draining notifications can
+  no longer pin and fill the shared async-notify queue (which, when full, fails
+  the transactions issuing `NOTIFY`). The trade-off is dispatch latency: with
+  NOTIFY off a freshly submitted job waits up to one `job_queue_interval` (vs
+  ~`nap_time` with NOTIFY on). Recommended for very high submit rates; leave on
+  for low-latency/low-traffic setups. In pure-poll mode the loop now sleeps the
+  poll interval instead of blocking `nap_time`, so raising `job_queue_interval`
+  genuinely lowers idle wake-ups.
+- **`dbms_job.set_notify(boolean)`** procedure to enable/disable both notify
+  triggers as a supported, reversible, idempotent operation. Pair
+  `CALL dbms_job.set_notify(false);` with the daemon's `enable_notify=0` for a
+  fully NOTIFY-free deployment. This replaces the manual `DROP TRIGGER`
+  previously documented for high-`NOTIFY`-rate workloads.
+
+### Changed
+- **Tidied the statement-level notify trigger functions.** They referenced
+  `NEW`/`OLD`, which are always `NULL` in a statement-level trigger, so that
+  logic was dead: the empty-`interval` normalisation never ran and the
+  `IF NEW.instance = OLD.instance` guard made the scheduled-`UPDATE` branch never
+  notify. The dead references are removed with no behaviour change (INSERT/
+  DELETE/TRUNCATE notify; UPDATE does not). The scheduled notify trigger now
+  fires only on `INSERT OR DELETE OR TRUNCATE`, so the daemon's hot dispatch and
+  completion `UPDATE`s no longer fire a no-op trigger.
+
 ## 3.1.0 - 2026-07-01
 
 High-load hardening (Phase 0). The scheduler daemon changes work against the

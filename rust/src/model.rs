@@ -50,6 +50,16 @@ pub struct Config {
     /// `true` relies on the `FOR UPDATE SKIP LOCKED` job claim to keep
     /// concurrent schedulers from executing the same job twice.
     pub allow_concurrent_schedulers: bool,
+    /// Whether the scheduler uses LISTEN/NOTIFY to be woken promptly when a job
+    /// is submitted. When `true` (default) the daemon `LISTEN`s on the two
+    /// notify channels and a fresh submit is picked up within `nap_time`. When
+    /// `false` the daemon does not `LISTEN` at all and relies purely on the
+    /// `job_queue_interval` poll: dispatch latency then equals the poll interval,
+    /// but submitters no longer pay `pg_notify`'s cluster-wide commit-time
+    /// serialization and a saturated scheduler can never back-pressure the shared
+    /// notify queue. For a fully NOTIFY-free deployment also drop the notify
+    /// triggers (`CALL dbms_job.set_notify(false)`) so submits stop emitting.
+    pub enable_notify: bool,
 }
 
 /// Controls how much job-execution history is written to
@@ -244,6 +254,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         assert!(config.debug);
         assert_eq!(config.pidfile, "/tmp/test.pid");
@@ -286,6 +297,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let cloned = config.clone();
         assert_eq!(cloned.pidfile, config.pidfile);

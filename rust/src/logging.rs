@@ -395,6 +395,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         }
     }
 
@@ -485,6 +486,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         // Should print to stderr without crashing
         dprint(&config, "LOG", "stderr fallback");
@@ -619,6 +621,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         dprint(&cfg, "LOG", "date formatted");
         flush_logger();
@@ -886,6 +889,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         dprint(&cfg, "LOG", "stderr fallback before reopen");
         reopen_logger();

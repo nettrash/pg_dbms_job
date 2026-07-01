@@ -273,6 +273,20 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                         );
                     }
                 }
+                "enable_notify" => {
+                    // Defaults to enabled; a malformed value keeps the current
+                    // (enabled) setting rather than silently disabling NOTIFY.
+                    let enabled = val.parse::<i32>().unwrap_or(config.enable_notify as i32) != 0;
+                    if config.enable_notify != enabled {
+                        config.enable_notify = enabled;
+                        dlog!(
+                            config,
+                            "LOG",
+                            "Setting enable_notify from configuration file to {}",
+                            config.enable_notify as i32
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -412,6 +426,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         }
     }
 
@@ -480,6 +495,7 @@ mod tests {
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: "".to_string(),
@@ -653,6 +669,44 @@ log_truncate_on_rotation=1
     }
 
     #[test]
+    fn read_config_parses_enable_notify() {
+        let mut config = float_test_config();
+        assert!(config.enable_notify); // default on
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_notify.conf");
+        fs::write(&path, "enable_notify=0\n").expect("write temp config");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert!(!config.enable_notify);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_enable_notify_malformed_keeps_default() {
+        // A non-numeric value must not silently disable NOTIFY; the enabled
+        // default is preserved.
+        let mut config = float_test_config();
+        assert!(config.enable_notify);
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_notify_bad.conf");
+        fs::write(&path, "enable_notify=maybe\n").expect("write temp config");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert!(config.enable_notify);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn read_config_missing_file_nodie() {
         let mut config = Config {
             debug: false,
@@ -671,6 +725,7 @@ log_truncate_on_rotation=1
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -706,6 +761,7 @@ log_truncate_on_rotation=1
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -758,6 +814,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -820,6 +877,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -855,6 +913,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -896,6 +955,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -935,6 +995,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -971,6 +1032,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -1012,6 +1074,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -1047,6 +1110,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -1084,6 +1148,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -1125,6 +1190,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -1162,6 +1228,7 @@ port=notanumber
             statement_timeout: 0.0,
             idle_in_transaction_timeout: 0.0,
             allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),

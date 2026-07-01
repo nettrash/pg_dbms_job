@@ -96,12 +96,29 @@ pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, ConnectErr
         ),
     }
 
-    client
-        .batch_execute("LISTEN dbms_job_scheduled_notify")
-        .map_err(|e| ConnectError::Other(e.to_string()))?;
-    client
-        .batch_execute("LISTEN dbms_job_async_notify")
-        .map_err(|e| ConnectError::Other(e.to_string()))?;
+    // Only register the NOTIFY listeners when notify wake-up is enabled. With
+    // enable_notify=off the daemon relies purely on the job_queue_interval poll,
+    // so it must not LISTEN — a listener that falls behind (e.g. while its worker
+    // pool is saturated) pins the cluster-wide async-notify queue tail.
+    if config.enable_notify {
+        client
+            .batch_execute("LISTEN dbms_job_scheduled_notify")
+            .map_err(|e| ConnectError::Other(e.to_string()))?;
+        client
+            .batch_execute("LISTEN dbms_job_async_notify")
+            .map_err(|e| ConnectError::Other(e.to_string()))?;
+        dprint(
+            config,
+            "LOG",
+            "NOTIFY wake-up enabled: LISTEN on dbms_job_async_notify and dbms_job_scheduled_notify",
+        );
+    } else {
+        dprint(
+            config,
+            "LOG",
+            "NOTIFY wake-up disabled (enable_notify=off); dispatching on job_queue_interval poll only",
+        );
+    }
 
     Ok(client)
 }

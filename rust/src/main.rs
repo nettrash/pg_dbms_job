@@ -233,14 +233,27 @@ fn main() {
 
         if let Some(client) = dbh.as_mut() {
             config_invalidated = false;
-            let mut notifications = client.notifications();
-            collect_notifications(
-                &mut notifications,
-                &config,
-                Duration::from_secs_f64(config.nap_time),
-                &mut async_count,
-                &mut scheduled_count,
-            );
+            if config.enable_notify {
+                let mut notifications = client.notifications();
+                collect_notifications(
+                    &mut notifications,
+                    &config,
+                    Duration::from_secs_f64(config.nap_time),
+                    &mut async_count,
+                    &mut scheduled_count,
+                );
+            } else {
+                // Pure-poll mode (enable_notify=off): the daemon does not LISTEN,
+                // so there is nothing to collect. Sleep until the next scan is due
+                // — waking early on shutdown — and let the job_queue_interval
+                // force-poll below claim both lanes. Sleeping the poll interval
+                // (rather than blocking nap_time) means raising job_queue_interval
+                // genuinely lowers idle wake-ups instead of spinning every nap.
+                sleep_interruptible(
+                    &terminate_flag,
+                    Duration::from_secs_f64(config.job_queue_interval),
+                );
+            }
         } else {
             thread::sleep(Duration::from_secs_f64(config.startup_delay));
             startup = true;
@@ -689,6 +702,7 @@ fn default_config() -> Config {
         statement_timeout: 0.0,
         idle_in_transaction_timeout: 0.0,
         allow_concurrent_schedulers: false,
+        enable_notify: true,
     }
 }
 
@@ -912,6 +926,14 @@ mod tests {
     fn default_config_pool_size() {
         let config = default_config();
         assert_eq!(config.pool_size, 100);
+    }
+
+    #[test]
+    fn default_config_enable_notify_on() {
+        // NOTIFY wake-up is on by default so existing deployments keep their
+        // low-latency dispatch; pure-poll is strictly opt-in.
+        let config = default_config();
+        assert!(config.enable_notify);
     }
 
     #[test]

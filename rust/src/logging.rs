@@ -392,6 +392,9 @@ mod tests {
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
         }
     }
 
@@ -479,6 +482,9 @@ mod tests {
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
         };
         // Should print to stderr without crashing
         dprint(&config, "LOG", "stderr fallback");
@@ -610,6 +616,9 @@ mod tests {
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
         };
         dprint(&cfg, "LOG", "date formatted");
         flush_logger();
@@ -874,6 +883,9 @@ mod tests {
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
         };
         dprint(&cfg, "LOG", "stderr fallback before reopen");
         reopen_logger();

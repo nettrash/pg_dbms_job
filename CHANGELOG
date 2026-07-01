@@ -2,6 +2,72 @@
 
 All notable changes to this project are documented in this file.
 
+## 3.1.0 - 2026-07-01
+
+High-load hardening (Phase 0). The scheduler daemon changes work against the
+existing schema; the one SQL change is the auto-scheduled partition maintenance
+below. Run `ALTER EXTENSION pg_dbms_job UPDATE TO '3.1.0';` and restart the
+scheduler binary.
+
+### Added
+- **Per-job execution guards.** New `statement_timeout` and
+  `idle_in_transaction_timeout` settings (seconds; `0` = unlimited, the
+  default) are applied via `SET LOCAL` inside each job's transaction. Without a
+  bound, one slow or hung job body pins a worker slot and a pooled connection
+  indefinitely, and enough of them freeze the single dispatch thread (and
+  shutdown). Set `statement_timeout` above your longest legitimate job runtime.
+- **Automatic run-details partition maintenance.** `maintain_run_details_partitions()`
+  is now submitted as a daily recurring job on install/upgrade, so monthly
+  partitions are created ahead of time and pruned without the operator having to
+  remember. Idempotent (never duplicated on re-run or dump/restore). Previously,
+  if left unscheduled, all history piled into the DEFAULT partition, blocking new
+  partition creation and bloating without bound.
+- **Startup Row-Level-Security check.** The daemon now emits a loud `WARNING`
+  when its database role is subject to RLS on the job tables (i.e. it is not the
+  owner, a superuser, or `BYPASSRLS`). Such a role silently sees and claims zero
+  jobs submitted by other users; the warning turns a silent misconfiguration
+  into a visible one.
+
+### Changed
+- **Bounded job claiming.** The dispatch scans now claim at most one worker
+  pool's worth of due jobs per cycle using `... WHERE job IN (SELECT ... ORDER BY
+  ... LIMIT n FOR UPDATE SKIP LOCKED)` instead of flipping `this_date` on the
+  entire due set in one statement. This bounds the in-memory claimed set (and the
+  rows left flagged running if the daemon dies mid-drain) regardless of backlog
+  depth, and makes the claim safe for multiple concurrent schedulers in future.
+- **Faster orphan recovery.** The default `stale_job_timeout` is lowered from
+  3600s to 300s, so jobs orphaned by a crash recover in minutes rather than an
+  hour. The `pg_stat_activity` liveness check still protects still-running jobs.
+- **Reaping and stats moved to an independent thread.** The stale-job reaper and
+  the periodic stats line now run on their own connection and timers instead of
+  inline in the dispatch loop, so a saturated worker pool (which blocks dispatch
+  in `await_worker_slot`) can no longer starve recovery or observability.
+- **Responsive shutdown.** `SIGTERM`/`SIGINT` is now honoured inside the dispatch
+  drain loops (and the worker-slot wait), so shutdown is no longer delayed behind
+  a large already-claimed batch.
+- **Fair async/scheduled dispatch.** The two lanes alternate which dispatches
+  first each cycle, so a large batch in one lane no longer head-of-line blocks
+  the other (e.g. immediate async jobs waiting behind a big scheduled batch).
+- **Fewer per-job round-trips.** The per-job setup (`SET ROLE`, `BEGIN`, the
+  timeout guards, and `SET LOCAL search_path`) is issued in a single round-trip
+  instead of up to four, raising the ceiling for short jobs. A failed setup now
+  also cleans up (`ROLLBACK`/`RESET`) so it cannot poison the pooled connection.
+- **Exactly-once for transactional jobs.** A successful job's completion
+  bookkeeping (clearing `this_date` for scheduled rows, deleting the row for
+  async rows) is now folded into the job's own transaction and commits
+  atomically with the body. Previously it ran in a separate statement after
+  `COMMIT`, so a crash in that window left a committed job that the reaper would
+  later re-run. Jobs whose effects are entirely in the database transaction are
+  now exactly-once; jobs with side effects outside the transaction remain
+  at-least-once and should be idempotent.
+
+### Added
+- **Optional horizontal scale-out** via `allow_concurrent_schedulers` (default
+  off). When off, a second scheduler aborts on startup as before. When on,
+  multiple schedulers can run against one database and share the queue safely —
+  the `FOR UPDATE SKIP LOCKED` claim prevents two of them from taking the same
+  job. Run each with its own pidfile (typically on separate hosts).
+
 ## 3.0.2 - 2026-06-05
 
 Scheduler-only release. The SQL schema is unchanged from 3.0.1;

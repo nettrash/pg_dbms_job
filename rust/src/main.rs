@@ -14,7 +14,7 @@ use crate::args::{parse_args, usage};
 use crate::config::read_config;
 use crate::constants::{REAP_INTERVAL_SECS, VERSION, WORKER_SLOT_POLL_INTERVAL};
 use crate::db::JobPool;
-use crate::db::{ConnectError, connect_db, create_job_pool};
+use crate::db::{ConnectError, connect_db, connect_maintenance, create_job_pool};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, reap_stale_jobs, spawn_job};
 use crate::logging::{dprint, reopen_logger, shutdown_logger};
 use crate::model::{Config, DbInfo, Job, JobKind, JobRunDetails, JobStats};
@@ -29,8 +29,8 @@ use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -97,30 +97,32 @@ fn main() {
     let mut async_jobs: HashMap<i64, Job> = HashMap::new();
     let mut previous_async_exec = Instant::now();
     let mut previous_scheduled_exec = Instant::now();
-    let mut previous_reap = Instant::now();
     let job_stats = Arc::new(JobStats::default());
-    let mut last_stats_at = Instant::now();
     let mut last_saturation_log: Option<Instant> = None;
     let mut startup = true;
     let mut config_invalidated = false;
     let mut in_recovery_logged = false;
+    // Flips every cycle so async and scheduled jobs take turns dispatching
+    // first, preventing either lane from permanently blocking the other.
+    let mut dispatch_async_first = false;
+
+    // Stale-job reaping and the periodic stats line run on their own thread and
+    // connection so a saturated worker pool (which blocks the dispatch loop)
+    // cannot starve them. The main loop republishes config + dbinfo here on
+    // reload.
+    let shared_state: SharedState = Arc::new(Mutex::new((Arc::clone(&config), dbinfo.clone())));
+    let maintenance_handle = {
+        let terminate_flag = Arc::clone(&terminate_flag);
+        let shared_state = Arc::clone(&shared_state);
+        let job_stats = Arc::clone(&job_stats);
+        thread::Builder::new()
+            .name("maintenance".to_string())
+            .spawn(move || maintenance_loop(terminate_flag, shared_state, job_stats))
+            .ok()
+    };
 
     while !terminate_flag.load(Ordering::Relaxed) {
         reap_children(&mut running_workers);
-
-        if config.stats_interval > 0 && last_stats_at.elapsed().as_secs() >= config.stats_interval {
-            let elapsed = last_stats_at.elapsed().as_secs();
-            let (started, finished) = job_stats.drain();
-            dlog!(
-                &config,
-                "LOG",
-                "stats: jobs started={}, finished={} in last {} seconds",
-                started,
-                finished,
-                elapsed
-            );
-            last_stats_at = Instant::now();
-        }
 
         if reload_flag.swap(false, Ordering::Relaxed) {
             // Drop the persistent log file handle *before* writing anything.
@@ -160,6 +162,9 @@ fn main() {
             } else {
                 config = Arc::new(cfg);
             }
+            // Hand the reloaded config + connection info to the maintenance thread.
+            *shared_state.lock().unwrap_or_else(|e| e.into_inner()) =
+                (Arc::clone(&config), dbinfo.clone());
             config_invalidated = true;
         }
 
@@ -266,9 +271,14 @@ fn main() {
             scheduled_count = 1;
         }
 
+        // Claim at most one worker-pool's worth of jobs per cycle so the
+        // in-memory claimed set (and the crash-exposed "flagged running" set)
+        // stays bounded regardless of backlog depth.
+        let claim_limit = effective_max_workers(&config) as i64;
+
         if async_count > 0 || startup {
             if let Some(client) = dbh.as_mut() {
-                get_async_jobs(client, &config, &mut async_jobs);
+                get_async_jobs(client, &config, &mut async_jobs, claim_limit);
             }
             previous_async_exec = Instant::now();
         }
@@ -280,6 +290,7 @@ fn main() {
                     &config,
                     &mut config_invalidated,
                     &mut scheduled_jobs,
+                    claim_limit,
                 );
             }
             previous_scheduled_exec = Instant::now();
@@ -293,57 +304,37 @@ fn main() {
         config_invalidated = false;
         startup = false;
 
-        // Periodically re-queue jobs abandoned by workers that never cleared
-        // their dispatch marker (e.g. a worker that could not obtain a pooled
-        // connection, or a crashed worker/daemon). Without this such rows stay
-        // flagged running forever and silently disappear from the queue. The
-        // check cadence is capped so it is never coarser than the eligibility
-        // age itself.
-        if config.stale_job_timeout > 0.0
-            && previous_reap.elapsed().as_secs_f64()
-                >= REAP_INTERVAL_SECS.min(config.stale_job_timeout)
-        {
-            if let Some(client) = dbh.as_mut() {
-                reap_stale_jobs(client, &config);
-            }
-            previous_reap = Instant::now();
-        }
+        // Stale-job reaping now runs on the maintenance thread (see
+        // maintenance_loop), so a saturated pool blocking the dispatch below can
+        // no longer starve it.
 
         let max_workers = effective_max_workers(&config);
+        let pool = job_pool.as_ref().unwrap();
 
-        for (_, job) in scheduled_jobs.drain() {
-            await_worker_slot(
+        // Alternate lane order each cycle so neither async nor scheduled jobs
+        // get permanent head-of-line priority over the other.
+        let order = if dispatch_async_first {
+            [JobKind::Async, JobKind::Scheduled]
+        } else {
+            [JobKind::Scheduled, JobKind::Async]
+        };
+        dispatch_async_first = !dispatch_async_first;
+        for kind in order {
+            let jobs = match kind {
+                JobKind::Async => &mut async_jobs,
+                JobKind::Scheduled => &mut scheduled_jobs,
+            };
+            dispatch_lane(
+                jobs,
+                kind,
                 &mut running_workers,
                 max_workers,
-                &config,
-                &mut last_saturation_log,
-            );
-            spawn_job(
-                JobKind::Scheduled,
-                job,
-                job_pool.as_ref().unwrap(),
+                pool,
                 &config,
                 &job_stats,
-                &mut running_workers,
                 &mut next_worker_id,
-            );
-        }
-
-        for (_, job) in async_jobs.drain() {
-            await_worker_slot(
-                &mut running_workers,
-                max_workers,
-                &config,
                 &mut last_saturation_log,
-            );
-            spawn_job(
-                JobKind::Async,
-                job,
-                job_pool.as_ref().unwrap(),
-                &config,
-                &job_stats,
-                &mut running_workers,
-                &mut next_worker_id,
+                &terminate_flag,
             );
         }
 
@@ -352,7 +343,13 @@ fn main() {
         }
     }
 
+    // Ensure the maintenance thread stops even when the loop exited for a reason
+    // other than a terminate signal (e.g. `--single`), otherwise its join hangs.
+    terminate_flag.store(true, Ordering::Relaxed);
     wait_all_children(&mut running_workers);
+    if let Some(handle) = maintenance_handle {
+        let _ = handle.join();
+    }
     release_pidfile();
     if Path::new(&config.pidfile).exists()
         && let Err(err) = std::fs::remove_file(&config.pidfile)
@@ -513,14 +510,18 @@ fn effective_max_workers(config: &Config) -> usize {
 ///     `error_delay` seconds (shared across both dispatch loops via
 ///     `last_saturation_log`) instead of once per poll — otherwise a sustained
 ///     backlog would flood the log.
+///   * It stops waiting as soon as `terminate_flag` is set, so a SIGTERM/SIGINT
+///     received while the pool is saturated is honoured promptly instead of
+///     after the whole claimed batch has drained.
 fn await_worker_slot(
     running_workers: &mut HashMap<u64, JoinHandle<()>>,
     max_workers: usize,
     config: &Config,
     last_saturation_log: &mut Option<Instant>,
+    terminate_flag: &AtomicBool,
 ) {
     reap_children(running_workers);
-    while running_workers.len() >= max_workers {
+    while running_workers.len() >= max_workers && !terminate_flag.load(Ordering::Relaxed) {
         let now = Instant::now();
         let due = last_saturation_log
             .is_none_or(|t| now.duration_since(t).as_secs_f64() >= config.error_delay);
@@ -535,6 +536,137 @@ fn await_worker_slot(
         }
         thread::sleep(WORKER_SLOT_POLL_INTERVAL);
         reap_children(running_workers);
+    }
+}
+
+/// Dispatch one lane (async or scheduled) of already-claimed jobs, spawning a
+/// worker per job with pool-size backpressure. Bails out early when
+/// `terminate_flag` is set so shutdown is not blocked behind a large claimed
+/// batch; any jobs left undrained keep their `this_date` marker and are
+/// recovered by the stale-job reaper after restart.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_lane(
+    jobs: &mut HashMap<i64, Job>,
+    kind: JobKind,
+    running_workers: &mut HashMap<u64, JoinHandle<()>>,
+    max_workers: usize,
+    pool: &Arc<JobPool>,
+    config: &Arc<Config>,
+    job_stats: &Arc<JobStats>,
+    next_worker_id: &mut u64,
+    last_saturation_log: &mut Option<Instant>,
+    terminate_flag: &AtomicBool,
+) {
+    for (_, job) in jobs.drain() {
+        if terminate_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        await_worker_slot(
+            running_workers,
+            max_workers,
+            config,
+            last_saturation_log,
+            terminate_flag,
+        );
+        spawn_job(
+            kind,
+            job,
+            pool,
+            config,
+            job_stats,
+            running_workers,
+            next_worker_id,
+        );
+    }
+}
+
+/// Shared handle giving the maintenance thread the current config + connection
+/// info. The main loop replaces the inner value on SIGHUP reload so the thread
+/// picks up new settings (e.g. `stale_job_timeout`) and a changed host.
+type SharedState = Arc<Mutex<(Arc<Config>, DbInfo)>>;
+
+/// Sleep up to `dur`, waking early (in `<=100ms` steps) if `terminate_flag` is
+/// set, so the maintenance thread shuts down promptly.
+fn sleep_interruptible(terminate_flag: &AtomicBool, dur: Duration) {
+    let step = Duration::from_millis(100);
+    let mut slept = Duration::ZERO;
+    while slept < dur && !terminate_flag.load(Ordering::Relaxed) {
+        let this = step.min(dur - slept);
+        thread::sleep(this);
+        slept += this;
+    }
+}
+
+/// Background maintenance loop: on its own connection and its own timers it
+/// runs the stale-job reaper and emits the periodic stats line. Keeping this off
+/// the main dispatch thread means a saturated worker pool (which blocks the
+/// dispatch loop in `await_worker_slot`) can no longer starve reaping or stats.
+fn maintenance_loop(
+    terminate_flag: Arc<AtomicBool>,
+    shared_state: SharedState,
+    job_stats: Arc<JobStats>,
+) {
+    let mut client: Option<Client> = None;
+    let mut last_reap = Instant::now();
+    let mut last_stats = Instant::now();
+    let tick = Duration::from_millis(250);
+
+    while !terminate_flag.load(Ordering::Relaxed) {
+        let (config, dbinfo) = {
+            let guard = shared_state.lock().unwrap_or_else(|e| e.into_inner());
+            (Arc::clone(&guard.0), guard.1.clone())
+        };
+
+        if client.is_none() {
+            match connect_maintenance(&dbinfo) {
+                Ok(c) => client = Some(c),
+                Err(err) => {
+                    dlog!(&config, "ERROR", "maintenance: cannot connect: {}", err);
+                    sleep_interruptible(
+                        &terminate_flag,
+                        Duration::from_secs_f64(config.startup_delay),
+                    );
+                    continue;
+                }
+            }
+        }
+
+        // Drop and reconnect on a dead connection instead of logging a failed
+        // reap every tick forever.
+        let healthy = client
+            .as_mut()
+            .map(|c| c.simple_query("SELECT 1").is_ok())
+            .unwrap_or(false);
+        if !healthy {
+            client = None;
+            sleep_interruptible(&terminate_flag, tick);
+            continue;
+        }
+
+        if config.stale_job_timeout > 0.0
+            && last_reap.elapsed().as_secs_f64() >= REAP_INTERVAL_SECS.min(config.stale_job_timeout)
+        {
+            if let Some(c) = client.as_mut() {
+                reap_stale_jobs(c, &config);
+            }
+            last_reap = Instant::now();
+        }
+
+        if config.stats_interval > 0 && last_stats.elapsed().as_secs() >= config.stats_interval {
+            let elapsed = last_stats.elapsed().as_secs();
+            let (started, finished) = job_stats.drain();
+            dlog!(
+                &config,
+                "LOG",
+                "stats: jobs started={}, finished={} in last {} seconds",
+                started,
+                finished,
+                elapsed
+            );
+            last_stats = Instant::now();
+        }
+
+        sleep_interruptible(&terminate_flag, tick);
     }
 }
 
@@ -553,7 +685,10 @@ fn default_config() -> Config {
         error_delay: 0.5,
         stats_interval: 15,
         job_run_details: JobRunDetails::All,
-        stale_job_timeout: 3600.0,
+        stale_job_timeout: 300.0,
+        statement_timeout: 0.0,
+        idle_in_transaction_timeout: 0.0,
+        allow_concurrent_schedulers: false,
     }
 }
 
@@ -814,7 +949,13 @@ mod tests {
         let mut last = None;
         // No workers running and a cap of 4: must not block and must not emit a
         // saturation notice.
-        await_worker_slot(&mut running, 4, &config, &mut last);
+        await_worker_slot(
+            &mut running,
+            4,
+            &config,
+            &mut last,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         assert!(running.is_empty());
         assert!(last.is_none(), "must not log saturation below the cap");
     }
@@ -828,7 +969,13 @@ mod tests {
         let mut last = None;
         // The up-front reap clears the finished worker so the cap is no longer
         // reached: it returns without ever entering the wait/log path.
-        await_worker_slot(&mut running, 1, &config, &mut last);
+        await_worker_slot(
+            &mut running,
+            1,
+            &config,
+            &mut last,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         assert!(running.is_empty(), "finished worker must be reaped");
         assert!(last.is_none(), "no wait happened, so no saturation log");
     }
@@ -854,13 +1001,47 @@ mod tests {
         let mut last = None;
         // Cap of 1 with a busy worker: the helper polls until the worker is
         // released and reaped, then returns.
-        await_worker_slot(&mut running, 1, &config, &mut last);
+        await_worker_slot(
+            &mut running,
+            1,
+            &config,
+            &mut last,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         releaser.join().unwrap();
         assert!(running.is_empty(), "released worker must be reaped");
         assert!(
             last.is_some(),
             "a real wait occurred, so saturation was logged at least once"
         );
+    }
+
+    #[test]
+    fn await_worker_slot_returns_when_terminate_set_despite_saturation() {
+        // A SIGTERM arriving while the pool is saturated must break the wait so
+        // shutdown is not blocked behind a full worker set. The worker here
+        // never finishes within the test, so only the terminate flag can end
+        // the wait.
+        use std::sync::atomic::AtomicBool;
+        let config = default_config();
+        let mut running: HashMap<u64, thread::JoinHandle<()>> = HashMap::new();
+        let barrier = Arc::new(Barrier::new(2));
+        let b = barrier.clone();
+        running.insert(
+            1,
+            thread::spawn(move || {
+                b.wait();
+            }),
+        );
+        let terminate = AtomicBool::new(true); // already set: must return at once
+        let mut last = None;
+        await_worker_slot(&mut running, 1, &config, &mut last, &terminate);
+        // The busy worker is still running (cap still reached), but we returned
+        // anyway because terminate was set.
+        assert_eq!(running.len(), 1);
+        // Release the worker so its thread can join cleanly.
+        barrier.wait();
+        thread::sleep(Duration::from_millis(20));
     }
 
     #[test]

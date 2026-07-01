@@ -215,6 +215,34 @@ If you are upgrading a database created before these were added, run the same
 statements once (they are idempotent). The indexes are partial so they stay
 small even with a large queue.
 
+### Delivery semantics and scaling
+
+**Delivery.** A successful job commits its completion bookkeeping (clearing the
+running marker for scheduled jobs, deleting the row for async jobs) in the *same*
+transaction as the job body, so the two are atomic. As a result:
+
+- Jobs whose effects are entirely inside the database transaction run
+  **exactly once** — a crash mid-job cannot leave committed work that is later
+  re-run.
+- Jobs with effects **outside** the transaction (sending mail, calling an
+  external API, `pg_amqp` autonomous publish, etc.) are **at-least-once** — on a
+  crash after the side effect but before commit, the job is retried. Make such
+  jobs idempotent.
+
+A per-job `statement_timeout` (see [Configuration](#configuration)) bounds how
+long any one job can hold a worker slot; on timeout the job fails and is retried
+(scheduled) or dropped (async), and the slot is freed.
+
+**Scaling.** Throughput on one scheduler is roughly
+`min(job_queue_processes, pool_size)` concurrent jobs divided by the mean job
+duration, driven by a single dispatch thread. To go beyond one machine, set
+`allow_concurrent_schedulers=1` and run several schedulers (each with its own
+pidfile, typically on separate hosts) against the same database: the
+`FOR UPDATE SKIP LOCKED` job claim guarantees a given job is taken by exactly one
+of them. Stale-job reaping and the run-details partition maintenance are safe to
+run from every scheduler (the reaper's liveness check is cluster-wide; the
+maintenance job is itself claimed by a single scheduler).
+
 ## [Configuration](#configuration)
 
 The configuration file uses simple `key = value` lines (the same style as `postgresql.conf`). The settings below are the ones most commonly tuned; [`rust/README.md`](rust/README.md) is the authoritative reference for every option, and [`etc/pg_dbms_job.conf`](etc/pg_dbms_job.conf) is a ready-to-edit template.
@@ -242,7 +270,17 @@ The configuration file uses simple `key = value` lines (the same style as `postg
    (`all` | `errors` | `none`); `errors` records only failed runs, `none` disables recording.
    Default `all`. See [Jobs execution history](#jobs-execution-history).
 - `stale_job_timeout`: age (seconds) after which a job flagged running with no live worker
-   backend is treated as abandoned and re-queued by the reaper; `0` disables it. Default `3600`.
+   backend is treated as abandoned and re-queued by the reaper; `0` disables it. Default `300`.
+- `statement_timeout`: per-job `statement_timeout`, in seconds; `0` = unlimited. Applied via
+   `SET LOCAL` inside each job's transaction. Under high load this is the key guard against a
+   single slow/hung job body pinning a worker slot and a pooled connection. Set it above your
+   longest legitimate job runtime. Default `0`.
+- `idle_in_transaction_timeout`: per-job `idle_in_transaction_session_timeout`, in seconds;
+   `0` = unlimited. Applied via `SET LOCAL`. Default `0`.
+- `allow_concurrent_schedulers`: allow more than one scheduler to run against the same
+   database for horizontal scale-out (`0`/`1`). When `0`, a second instance aborts on startup.
+   When `1`, multiple schedulers share the queue safely via `FOR UPDATE SKIP LOCKED`; run each
+   with its own pidfile. Default `0`. See [Delivery semantics and scaling](#delivery-semantics-and-scaling).
 
 ### Database
 

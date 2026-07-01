@@ -49,11 +49,12 @@ pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, ConnectErr
         .map_err(|e| ConnectError::Other(e.to_string()))?;
     let count: i64 = row.get(0);
     let in_recovery: bool = row.get(1);
-    if count > 1 {
+    if count > 1 && !config.allow_concurrent_schedulers {
         dprint(
             config,
             "FATAL",
-            "another pg_dbms_job process is running on this database! Aborting.",
+            "another pg_dbms_job process is running on this database! Aborting. \
+             (set allow_concurrent_schedulers=1 to run multiple schedulers against one database)",
         );
         die("FATAL: another pg_dbms_job process is running on this database! Aborting.");
     }
@@ -61,13 +62,78 @@ pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, ConnectErr
         return Err(ConnectError::InRecovery);
     }
 
-    client
-        .batch_execute("LISTEN dbms_job_scheduled_notify")
-        .map_err(|e| ConnectError::Other(e.to_string()))?;
-    client
-        .batch_execute("LISTEN dbms_job_async_notify")
-        .map_err(|e| ConnectError::Other(e.to_string()))?;
+    // Warn loudly if the scheduler's own role is subject to Row Level Security
+    // on the job tables. The RLS policy is `USING (log_user = current_user)`, so
+    // a non-owner, non-superuser role silently sees and claims ZERO jobs
+    // submitted by other users — they appear to vanish with no error. Owner,
+    // superuser and BYPASSRLS roles are exempt (this is the documented
+    // requirement). A NULL result means the tables don't exist yet (extension
+    // not installed), so the check is skipped. Best-effort: never fatal.
+    match client.query_one(
+        "SELECT bool_and(r.rolsuper OR r.rolbypassrls \
+                OR (c.relowner = r.oid AND NOT c.relforcerowsecurity)) \
+           FROM pg_catalog.pg_class c \
+           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+           JOIN pg_catalog.pg_roles r ON r.rolname = current_user \
+          WHERE n.nspname = 'dbms_job' \
+            AND c.relname IN ('all_scheduled_jobs', 'all_async_jobs')",
+        &[],
+    ) {
+        Ok(row) if row.get::<_, Option<bool>>(0) == Some(false) => {
+            dprint(
+                config,
+                "WARNING",
+                "the scheduler's database role is subject to Row Level Security on the dbms_job \
+                 tables: it will only see jobs it submitted itself and will silently skip jobs \
+                 owned by other users. Connect as the tables' owner or a superuser (see README).",
+            );
+        }
+        Ok(_) => {}
+        Err(_) => dprint(
+            config,
+            "DEBUG",
+            "could not verify the scheduler role's RLS exemption (non-fatal)",
+        ),
+    }
 
+    // Only register the NOTIFY listeners when notify wake-up is enabled. With
+    // enable_notify=off the daemon relies purely on the job_queue_interval poll,
+    // so it must not LISTEN — a listener that falls behind (e.g. while its worker
+    // pool is saturated) pins the cluster-wide async-notify queue tail.
+    if config.enable_notify {
+        client
+            .batch_execute("LISTEN dbms_job_scheduled_notify")
+            .map_err(|e| ConnectError::Other(e.to_string()))?;
+        client
+            .batch_execute("LISTEN dbms_job_async_notify")
+            .map_err(|e| ConnectError::Other(e.to_string()))?;
+        dprint(
+            config,
+            "LOG",
+            "NOTIFY wake-up enabled: LISTEN on dbms_job_async_notify and dbms_job_scheduled_notify",
+        );
+    } else {
+        dprint(
+            config,
+            "LOG",
+            "NOTIFY wake-up disabled (enable_notify=off); dispatching on job_queue_interval poll only",
+        );
+    }
+
+    Ok(client)
+}
+
+/// Connect a standalone client for the background maintenance thread (stale-job
+/// reaping and stats). Unlike [`connect_db`] this does NOT run the singleton
+/// guard — it uses a distinct `application_name` and is expected to coexist with
+/// the `pg_dbms_job:main` connection — and it does not LISTEN for notifications.
+pub fn connect_maintenance(dbinfo: &DbInfo) -> Result<Client, String> {
+    let conn_str = build_conn_str(dbinfo);
+    let mut client =
+        Client::connect(&conn_str, NoTls).map_err(|e: postgres::Error| e.to_string())?;
+    client
+        .batch_execute("SET application_name TO 'pg_dbms_job:maintenance'")
+        .map_err(|e| e.to_string())?;
     Ok(client)
 }
 

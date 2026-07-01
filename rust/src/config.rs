@@ -251,6 +251,42 @@ pub fn read_config(config_file: &str, config: &mut Config, dbinfo: &mut DbInfo, 
                         );
                     }
                 },
+                "statement_timeout" => {
+                    apply_nonneg_float(config, "statement_timeout", &val, |c| {
+                        &mut c.statement_timeout
+                    });
+                }
+                "idle_in_transaction_timeout" => {
+                    apply_nonneg_float(config, "idle_in_transaction_timeout", &val, |c| {
+                        &mut c.idle_in_transaction_timeout
+                    });
+                }
+                "allow_concurrent_schedulers" => {
+                    let enabled = val.parse::<i32>().unwrap_or(0) != 0;
+                    if config.allow_concurrent_schedulers != enabled {
+                        config.allow_concurrent_schedulers = enabled;
+                        dlog!(
+                            config,
+                            "LOG",
+                            "Setting allow_concurrent_schedulers from configuration file to {}",
+                            config.allow_concurrent_schedulers as i32
+                        );
+                    }
+                }
+                "enable_notify" => {
+                    // Defaults to enabled; a malformed value keeps the current
+                    // (enabled) setting rather than silently disabling NOTIFY.
+                    let enabled = val.parse::<i32>().unwrap_or(config.enable_notify as i32) != 0;
+                    if config.enable_notify != enabled {
+                        config.enable_notify = enabled;
+                        dlog!(
+                            config,
+                            "LOG",
+                            "Setting enable_notify from configuration file to {}",
+                            config.enable_notify as i32
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -292,6 +328,41 @@ fn apply_positive_float(
             raw,
             current
         );
+    }
+}
+
+/// Parse a configuration value as a finite, non-negative `f64` and store it via
+/// `field`. Unlike [`apply_positive_float`], `0` is accepted (it disables the
+/// feature). On invalid input the existing value is preserved and an error line
+/// is logged. Shared by the per-job timeout settings.
+fn apply_nonneg_float(
+    config: &mut Config,
+    name: &str,
+    raw: &str,
+    field: impl FnOnce(&mut Config) -> &mut f64,
+) {
+    match raw.parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => {
+            *field(config) = v;
+            dlog!(
+                config,
+                "LOG",
+                "Setting {} from configuration file to {}",
+                name,
+                v
+            );
+        }
+        _ => {
+            let current = *field(config);
+            dlog!(
+                config,
+                "ERROR",
+                "Invalid {} value {} in configuration file, must be a non-negative number (0 disables). Ignoring. Actual value remains {}",
+                name,
+                raw,
+                current
+            );
+        }
     }
 }
 
@@ -352,6 +423,10 @@ mod tests {
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         }
     }
 
@@ -417,6 +492,10 @@ mod tests {
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: "".to_string(),
@@ -521,6 +600,113 @@ log_truncate_on_rotation=1
     }
 
     #[test]
+    fn read_config_parses_per_job_timeouts() {
+        let mut config = float_test_config();
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_timeouts.conf");
+        fs::write(
+            &path,
+            "statement_timeout=30\nidle_in_transaction_timeout=60\n",
+        )
+        .expect("write temp config");
+
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+
+        assert_eq!(config.statement_timeout, 30.0);
+        assert_eq!(config.idle_in_transaction_timeout, 60.0);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_per_job_timeout_zero_disables_and_negative_rejected() {
+        let mut config = float_test_config();
+        config.statement_timeout = 15.0; // non-default starting value
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        // 0 is accepted (disables); a negative value is rejected and the field
+        // keeps its previous value.
+        let path = temp_path("pg_dbms_job_timeouts_edge.conf");
+        fs::write(
+            &path,
+            "statement_timeout=0\nidle_in_transaction_timeout=-1\n",
+        )
+        .expect("write temp config");
+
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+
+        assert_eq!(config.statement_timeout, 0.0);
+        assert_eq!(config.idle_in_transaction_timeout, 0.0); // fixture default kept
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_parses_allow_concurrent_schedulers() {
+        let mut config = float_test_config();
+        assert!(!config.allow_concurrent_schedulers); // default off
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_multi.conf");
+        fs::write(&path, "allow_concurrent_schedulers=1\n").expect("write temp config");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert!(config.allow_concurrent_schedulers);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_parses_enable_notify() {
+        let mut config = float_test_config();
+        assert!(config.enable_notify); // default on
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_notify.conf");
+        fs::write(&path, "enable_notify=0\n").expect("write temp config");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert!(!config.enable_notify);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_config_enable_notify_malformed_keeps_default() {
+        // A non-numeric value must not silently disable NOTIFY; the enabled
+        // default is preserved.
+        let mut config = float_test_config();
+        assert!(config.enable_notify);
+        let mut dbinfo = DbInfo {
+            host: String::new(),
+            database: String::new(),
+            user: String::new(),
+            passwd: String::new(),
+            port: 5432,
+        };
+        let path = temp_path("pg_dbms_job_notify_bad.conf");
+        fs::write(&path, "enable_notify=maybe\n").expect("write temp config");
+        read_config(path.to_str().unwrap(), &mut config, &mut dbinfo, false);
+        assert!(config.enable_notify);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn read_config_missing_file_nodie() {
         let mut config = Config {
             debug: false,
@@ -536,6 +722,10 @@ log_truncate_on_rotation=1
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -568,6 +758,10 @@ log_truncate_on_rotation=1
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -617,6 +811,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -676,6 +874,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -708,6 +910,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -746,6 +952,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -782,6 +992,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -815,6 +1029,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -853,6 +1071,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -885,6 +1107,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -919,6 +1145,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -957,6 +1187,10 @@ port=notanumber
             stats_interval: 45,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),
@@ -991,6 +1225,10 @@ port=notanumber
             stats_interval: 0,
             job_run_details: crate::model::JobRunDetails::All,
             stale_job_timeout: 3600.0,
+            statement_timeout: 0.0,
+            idle_in_transaction_timeout: 0.0,
+            allow_concurrent_schedulers: false,
+            enable_notify: true,
         };
         let mut dbinfo = DbInfo {
             host: String::new(),

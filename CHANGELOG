@@ -2,6 +2,59 @@
 
 All notable changes to this project are documented in this file.
 
+## 3.2.1 - 2026-09-10
+
+Bug-fix release. Run `ALTER EXTENSION pg_dbms_job UPDATE TO '3.2.1';` and
+restart the scheduler binary.
+
+### Fixed
+- **`all_scheduled_jobs.failures` stayed `NULL` forever for jobs that never
+  succeed** (#25). The column had no default, so new scheduled jobs started at
+  `NULL`, and every failure path incremented it with `failures = failures + 1`,
+  which is `NULL + 1 = NULL` in PostgreSQL. Only a successful run (which writes
+  `failures = 0`) could move it off `NULL`, so a job failing on every attempt
+  showed `failures = NULL` however many times it had failed. The column is now
+  `NOT NULL DEFAULT 0`, and the scheduler's failure and stale-job-reaper
+  increments use `COALESCE(failures, 0) + 1`, so the 3.2.1 daemon also counts
+  correctly against a schema that has not been upgraded yet.
+- **The maintenance thread ran its reap `UPDATE`s against read-only standbys**
+  (#24, since 3.1.0). When stale-job reaping moved to its own thread and
+  connection, that connection skipped the `pg_is_in_recovery()` check the main
+  loop does. On a physical streaming replica the main loop correctly backed
+  off, but the maintenance thread stayed connected and failed both reap
+  `UPDATE`s with `cannot execute UPDATE in a read-only transaction` every reap
+  interval, indefinitely. It now applies the same recovery check: while the
+  database is in recovery it keeps no session on the standby and retries every
+  `startup_delay`, and it resumes reaping as soon as the standby is promoted.
+
+### Security
+- Updated the scheduler's PostgreSQL driver to `tokio-postgres` 0.7.18 and
+  `postgres-protocol` 0.6.12, fixing three denial-of-service advisories that a
+  malicious or compromised server could trigger: an unbounded SCRAM iteration
+  count (RUSTSEC-2026-0179), a panic on a `DataRow` with fewer fields than
+  columns (RUSTSEC-2026-0178) and a panic decoding a malformed `hstore` value
+  (RUSTSEC-2026-0180). This also moves `rand` to 0.10, clearing the
+  RUSTSEC-2026-0097 unsoundness warning.
+
+### Upgrade notes
+- The upgrade sets the existing `NULL` counters to `0`. Those rows are the jobs
+  that have never completed successfully (`last_date IS NULL`); their failures
+  before the upgrade were never counted, so they start from `0`. If job-run
+  history is enabled (`job_run_details = all` or `errors`), you can restore a
+  lower bound from the history still retained. The query scans the whole
+  history table once and is safe to run at any time after the upgrade:
+
+  ```sql
+  UPDATE dbms_job.all_scheduled_jobs j
+     SET failures = GREATEST(j.failures, h.errors)
+    FROM (SELECT job_name, count(*) AS errors
+            FROM dbms_job.all_scheduler_job_run_details
+           WHERE status = 'ERROR'
+           GROUP BY job_name) h
+   WHERE j.last_date IS NULL
+     AND h.job_name = j.job::text;
+  ```
+
 ## 3.2.0 - 2026-07-01
 
 Optional pure-polling mode. The scheduler can now run without LISTEN/NOTIFY,

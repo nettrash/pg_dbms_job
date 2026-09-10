@@ -166,7 +166,7 @@ fn delete_completed_async(client: &mut Client, jobid: i64) -> Result<(), postgre
 /// The leaked rows have not executed their body (they fail during setup, before
 /// the DO block), so clearing the marker re-queues them for another attempt.
 /// Scheduled rows additionally bump `failures`, mirroring the normal
-/// failure-path bookkeeping.
+/// failure-path bookkeeping (NULL-safe, see `execute_job`).
 pub fn reap_stale_jobs(client: &mut Client, config: &Config) {
     let timeout = config.stale_job_timeout;
     if timeout <= 0.0 {
@@ -192,7 +192,7 @@ pub fn reap_stale_jobs(client: &mut Client, config: &Config) {
     }
 
     match client.execute(
-        "UPDATE dbms_job.all_scheduled_jobs AS j SET this_date = NULL, failures = failures + 1 \
+        "UPDATE dbms_job.all_scheduled_jobs AS j SET this_date = NULL, failures = COALESCE(failures, 0) + 1 \
          WHERE j.this_date IS NOT NULL \
            AND j.this_date < current_timestamp - make_interval(secs => $1) \
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a \
@@ -345,10 +345,13 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
         } else {
             match kind {
                 // Scheduled: the row's `this_date` is still set from dispatch;
-                // clear it and bump `failures` so the row retries.
+                // clear it and bump `failures` so the row retries. COALESCE
+                // because schemas older than 3.2.1 have no default on
+                // `failures`, so never-succeeded jobs there still hold NULL,
+                // and `NULL + 1` would keep them NULL forever.
                 JobKind::Scheduled => {
                     if let Err(err) = client.execute(
-                        "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, failures = failures+1 WHERE job = $1",
+                        "UPDATE dbms_job.all_scheduled_jobs SET this_date = NULL, failures = COALESCE(failures, 0) + 1 WHERE job = $1",
                         &[&job.job],
                     ) {
                         dlog!(

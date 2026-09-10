@@ -379,7 +379,7 @@ CREATE TABLE dbms_job.all_scheduled_jobs
 	total_time interval, -- total wall clock time spent by the system on this job, in seconds
 	broken boolean DEFAULT false, -- true: no attempt is made to run this job, false: an attempt is made to run this job
 	interval text, -- a date function, evaluated at the start of execution, becomes next next_date
-	failures bigint, -- number of times the job has started and failed since its last success
+	failures bigint NOT NULL DEFAULT 0, -- number of times the job has started and failed since its last success
 	what text  NOT NULL, -- body of the anonymous pl/sql block that the job executes
 	nls_env text, -- session parameters describing the nls environment of the job (not used)
 	misc_env bytea, -- Other session parameters that apply to this job (not used)

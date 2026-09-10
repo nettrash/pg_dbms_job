@@ -17,6 +17,15 @@ restart the scheduler binary.
   `NOT NULL DEFAULT 0`, and the scheduler's failure and stale-job-reaper
   increments use `COALESCE(failures, 0) + 1`, so the 3.2.1 daemon also counts
   correctly against a schema that has not been upgraded yet.
+- **The maintenance thread ran its reap `UPDATE`s against read-only standbys**
+  (#24, since 3.1.0). When stale-job reaping moved to its own thread and
+  connection, that connection skipped the `pg_is_in_recovery()` check the main
+  loop does. On a physical streaming replica the main loop correctly backed
+  off, but the maintenance thread stayed connected and failed both reap
+  `UPDATE`s with `cannot execute UPDATE in a read-only transaction` every reap
+  interval, indefinitely. It now applies the same recovery check: while the
+  database is in recovery it keeps no session on the standby and retries every
+  `startup_delay`, and it resumes reaping as soon as the standby is promoted.
 
 ### Security
 - Updated the scheduler's PostgreSQL driver to `tokio-postgres` 0.7.18 and

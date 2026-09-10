@@ -622,6 +622,7 @@ fn maintenance_loop(
     let mut client: Option<Client> = None;
     let mut last_reap = Instant::now();
     let mut last_stats = Instant::now();
+    let mut in_recovery_logged = false;
     let tick = Duration::from_millis(250);
 
     while !terminate_flag.load(Ordering::Relaxed) {
@@ -632,7 +633,35 @@ fn maintenance_loop(
 
         if client.is_none() {
             match connect_maintenance(&dbinfo) {
-                Ok(c) => client = Some(c),
+                Ok(c) => {
+                    if in_recovery_logged {
+                        dprint(
+                            &config,
+                            "DEBUG",
+                            "maintenance: database has exited recovery mode, resuming",
+                        );
+                        in_recovery_logged = false;
+                    }
+                    client = Some(c);
+                }
+                // Stay off a read-only standby (every reap UPDATE would fail) and
+                // retry like the main loop does. Only DEBUG here: the main loop
+                // already reports recovery at WARNING.
+                Err(ConnectError::InRecovery) => {
+                    if !in_recovery_logged {
+                        dprint(
+                            &config,
+                            "DEBUG",
+                            "maintenance: database is in recovery, pausing stale-job reaping",
+                        );
+                        in_recovery_logged = true;
+                    }
+                    sleep_interruptible(
+                        &terminate_flag,
+                        Duration::from_secs_f64(config.startup_delay),
+                    );
+                    continue;
+                }
                 Err(err) => {
                     dlog!(&config, "ERROR", "maintenance: cannot connect: {}", err);
                     sleep_interruptible(

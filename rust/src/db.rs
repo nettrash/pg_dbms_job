@@ -127,13 +127,26 @@ pub fn connect_db(dbinfo: &DbInfo, config: &Config) -> Result<Client, ConnectErr
 /// reaping and stats). Unlike [`connect_db`] this does NOT run the singleton
 /// guard — it uses a distinct `application_name` and is expected to coexist with
 /// the `pg_dbms_job:main` connection — and it does not LISTEN for notifications.
-pub fn connect_maintenance(dbinfo: &DbInfo) -> Result<Client, String> {
+///
+/// It does apply the same recovery guard as [`connect_db`]: a standby is
+/// read-only, so every reap UPDATE would fail there. Returning
+/// [`ConnectError::InRecovery`] drops the connection, so no maintenance session
+/// is left on the standby; the caller backs off and retries, and picks the
+/// database up again once it is promoted.
+pub fn connect_maintenance(dbinfo: &DbInfo) -> Result<Client, ConnectError> {
     let conn_str = build_conn_str(dbinfo);
     let mut client =
-        Client::connect(&conn_str, NoTls).map_err(|e: postgres::Error| e.to_string())?;
+        Client::connect(&conn_str, NoTls).map_err(|e| ConnectError::Other(e.to_string()))?;
     client
         .batch_execute("SET application_name TO 'pg_dbms_job:maintenance'")
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ConnectError::Other(e.to_string()))?;
+    let in_recovery: bool = client
+        .query_one("SELECT pg_is_in_recovery()", &[])
+        .map_err(|e| ConnectError::Other(e.to_string()))?
+        .get(0);
+    if in_recovery {
+        return Err(ConnectError::InRecovery);
+    }
     Ok(client)
 }
 

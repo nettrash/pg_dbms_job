@@ -2,7 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 3.2.2 - 2026-11-24
+
+PostgreSQL 19 support release, which also makes failed jobs record why they
+failed. Run `ALTER EXTENSION pg_dbms_job UPDATE TO '3.2.2';` and restart the
+scheduler binary. The SQL schema is unchanged from 3.2.1: the update script
+only advances the extension version.
 
 ### Added
 - **PostgreSQL 19 support** (#29). The extension and the scheduler run on
@@ -27,6 +32,28 @@ All notable changes to this project are documented in this file.
   Docker image (`rust:1.100-bookworm`) build with Rust 1.100.0 instead of
   1.93.0. The duplicate `homepage` field is removed from `rust/Cargo.toml`;
   Rust 1.100's cargo warns that it repeats `repository` on every build.
+
+### Fixed
+- **Failed jobs were logged and recorded as just `db error`, without the
+  reason** (since at least 3.0.2.1). The scheduler formatted PostgreSQL driver
+  errors with their `Display`, which in `tokio-postgres` is only the error's
+  kind (`db error`, `error connecting to server`); the server's message is the
+  error's source and was dropped. A failing job therefore logged
+  `job 42 failure, reason: db error` and stored `sqlstate=22012, db error` in
+  `all_scheduler_job_run_details.additional_info`. Both now carry the server's
+  report on one line, as psql shows it, with DETAIL and HINT when the server
+  sent them, e.g. `sqlstate=22012, ERROR: division by zero`.
+- **The same loss hid why the scheduler could not connect or run its own
+  queries.** A rejected login, for example, now logs
+  `FATAL: password authentication failed for user "..."` instead of
+  `db error`. A job that cannot get a pooled connection now logs the reason
+  the pool could not open one, e.g. `timed out waiting for connection: FATAL:
+  sorry, too many clients already`, instead of
+  `timed out waiting for connection: db error`. The two async dispatch queries
+  logged a bare `can't execute statement` on failure and now give the reason
+  too.
+- `ci/pg_compat_test.sh` now checks that a failed job's history row and log
+  line carry the server's error message, so this cannot regress unnoticed.
 
 ### Security
 - Updated `ctutils` to 0.4.8, fixing non-constant-time mask generation and

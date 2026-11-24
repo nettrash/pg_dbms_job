@@ -14,7 +14,7 @@ use crate::args::{parse_args, usage};
 use crate::config::read_config;
 use crate::constants::{REAP_INTERVAL_SECS, VERSION, WORKER_SLOT_POLL_INTERVAL};
 use crate::db::JobPool;
-use crate::db::{ConnectError, connect_db, connect_maintenance, create_job_pool};
+use crate::db::{ConnectError, connect_db, connect_maintenance, create_job_pool, pg_error_text};
 use crate::jobs::{get_async_jobs, get_scheduled_jobs, reap_stale_jobs, spawn_job};
 use crate::logging::{dprint, reopen_logger, shutdown_logger};
 use crate::model::{Config, DbInfo, Job, JobKind, JobRunDetails, JobStats};
@@ -474,7 +474,12 @@ fn collect_notifications<S: NotificationSource>(
         // Nothing arrived this cycle: do not poll again, leave the tallies at 0.
         Ok(None) => return,
         Err(err) => {
-            dlog!(config, "ERROR", "notification error: {err}");
+            dlog!(
+                config,
+                "ERROR",
+                "notification error: {}",
+                pg_error_text(&err)
+            );
             return;
         }
     }
@@ -486,7 +491,12 @@ fn collect_notifications<S: NotificationSource>(
             }
             Ok(None) => break,
             Err(err) => {
-                dlog!(config, "ERROR", "notification error: {err}");
+                dlog!(
+                    config,
+                    "ERROR",
+                    "notification error: {}",
+                    pg_error_text(&err)
+                );
                 break;
             }
         }

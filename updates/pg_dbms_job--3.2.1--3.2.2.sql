@@ -1,0 +1,10 @@
+----
+-- Upgrade pg_dbms_job from 3.2.1 to 3.2.2.
+--
+-- Run with: ALTER EXTENSION pg_dbms_job UPDATE TO '3.2.2';
+--
+-- 3.2.2 adds PostgreSQL 19 support, which needs no SQL change, and is
+-- otherwise a scheduler-only release. The SQL schema is unchanged from 3.2.1,
+-- so this migration intentionally does nothing but advance the extension
+-- version. Restart the scheduler binary to pick up its changes.
+----

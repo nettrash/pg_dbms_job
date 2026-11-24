@@ -324,19 +324,28 @@ hist() {
                       WHERE job_name = '$1' AND owner = '$APP_ROLE' AND ($2)"
 }
 ok_run="status IS DISTINCT FROM 'ERROR'"
-failed_run="status = 'ERROR' AND additional_info LIKE 'sqlstate=P0001%'"
+# failed_run <message>: a failure recorded with its SQLSTATE and the server's
+# message, as the job's RAISE produced it.
+failed_run() { echo "status = 'ERROR' AND additional_info = 'sqlstate=P0001, ERROR: $1'"; }
 
 check "every job ran as $APP_ROLE" "0" \
   "$(q -d "$TEST_DB" -c "SELECT count(*) FROM public.compat_results WHERE run_as <> '$APP_ROLE'")"
 check "history: async job succeeded once" "1" "$(hist "$async_ok" "$ok_run")"
-check "history: failing async job failed once (SQLSTATE P0001)" "1" "$(hist "$async_fail" "$failed_run")"
+check "history: failing async job failed once, with its error message" "1" \
+  "$(hist "$async_fail" "$(failed_run 'compat async failure')")"
 check "history: one-shot job succeeded once" "1" "$(hist "$oneshot" "$ok_run")"
 check_ge "history: recurring job succeeded" 2 "$(hist "$recurring" "$ok_run")"
-check_ge "history: failing recurring job failed (SQLSTATE P0001)" 2 "$(hist "$sched_fail" "$failed_run")"
+check_ge "history: failing recurring job failed, with its error message" 2 \
+  "$(hist "$sched_fail" "$(failed_run 'compat scheduled failure')")"
 check "$APP_ROLE sees only its own history (row level security)" "t" \
   "$(q -d "$TEST_DB" -c "SET ROLE $APP_ROLE" \
                      -c "SELECT count(*) > 0 AND bool_and(owner = current_user)
                            FROM dbms_job.all_scheduler_job_run_details")"
+# The log line for a failed job carries the server's message too.
+if ! grep -q "job $async_fail failure, reason: ERROR: compat async failure" "$LOG"; then
+  fail "scheduler log does not give the failing async job's error message"
+fi
+echo "ok - scheduler log gives the failing job's error message"
 if grep -qi 'panic' "$LOG"; then
   fail "scheduler log mentions a panic"
 fi

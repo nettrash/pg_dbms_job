@@ -1,7 +1,7 @@
 //! Job discovery and execution logic.
 
 use crate::constants::WORKER_STACK_SIZE;
-use crate::db::{JobPool, get_job_connection, reset_job_connection};
+use crate::db::{JobPool, get_job_connection, pg_error_text, reset_job_connection};
 use crate::dlog;
 use crate::logging::dprint;
 use crate::model::{Config, Job, JobKind, JobRunDetails, JobStats, JobStatsGuard};
@@ -44,7 +44,12 @@ pub fn get_scheduled_jobs(
             }
         }
         Err(err) => {
-            dlog!(config, "ERROR", "can't execute statement, {err}");
+            dlog!(
+                config,
+                "ERROR",
+                "can't execute statement, {}",
+                pg_error_text(&err)
+            );
             *config_invalidated = true;
         }
     }
@@ -68,33 +73,45 @@ pub fn get_async_jobs(
     jobs.clear();
     // Bounded, SKIP LOCKED claim — see get_scheduled_jobs for the rationale.
     let query = "UPDATE dbms_job.all_async_jobs AS j SET this_date = current_timestamp WHERE j.job IN (SELECT a.job FROM dbms_job.all_async_jobs a WHERE a.this_date IS NULL ORDER BY a.job LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING j.job, j.what, j.log_user, j.schema_user";
-    if let Ok(rows) = client.query(query, &[&limit]) {
-        for row in rows {
-            let job = Job {
-                job: row.get::<_, i64>("job"),
-                what: row.get::<_, String>("what"),
-                log_user: row.get::<_, Option<String>>("log_user"),
-                schema_user: row.get::<_, Option<String>>("schema_user"),
-            };
-            jobs.insert(job.job, job);
+    match client.query(query, &[&limit]) {
+        Ok(rows) => {
+            for row in rows {
+                let job = Job {
+                    job: row.get::<_, i64>("job"),
+                    what: row.get::<_, String>("what"),
+                    log_user: row.get::<_, Option<String>>("log_user"),
+                    schema_user: row.get::<_, Option<String>>("schema_user"),
+                };
+                jobs.insert(job.job, job);
+            }
         }
-    } else {
-        dprint(config, "ERROR", "can't execute statement");
+        Err(err) => dlog!(
+            config,
+            "ERROR",
+            "can't execute statement, {}",
+            pg_error_text(&err)
+        ),
     }
 
     let query = "UPDATE dbms_job.all_scheduled_jobs AS j SET this_date = current_timestamp WHERE j.job IN (SELECT s.job FROM dbms_job.all_scheduled_jobs s WHERE s.this_date IS NULL AND s.interval IS NULL AND s.next_date <= current_timestamp ORDER BY s.next_date LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING j.job, j.what, j.log_user, j.schema_user";
-    if let Ok(rows) = client.query(query, &[&limit]) {
-        for row in rows {
-            let job = Job {
-                job: row.get::<_, i64>("job"),
-                what: row.get::<_, String>("what"),
-                log_user: row.get::<_, Option<String>>("log_user"),
-                schema_user: row.get::<_, Option<String>>("schema_user"),
-            };
-            jobs.insert(job.job, job);
+    match client.query(query, &[&limit]) {
+        Ok(rows) => {
+            for row in rows {
+                let job = Job {
+                    job: row.get::<_, i64>("job"),
+                    what: row.get::<_, String>("what"),
+                    log_user: row.get::<_, Option<String>>("log_user"),
+                    schema_user: row.get::<_, Option<String>>("schema_user"),
+                };
+                jobs.insert(job.job, job);
+            }
         }
-    } else {
-        dprint(config, "ERROR", "can't execute statement");
+        Err(err) => dlog!(
+            config,
+            "ERROR",
+            "can't execute statement, {}",
+            pg_error_text(&err)
+        ),
     }
 
     dlog!(
@@ -187,7 +204,7 @@ pub fn reap_stale_jobs(client: &mut Client, config: &Config) {
             config,
             "ERROR",
             "failed to reap stale asynchronous jobs: {}",
-            err
+            pg_error_text(&err)
         ),
     }
 
@@ -205,7 +222,7 @@ pub fn reap_stale_jobs(client: &mut Client, config: &Config) {
             config,
             "ERROR",
             "failed to reap stale scheduled jobs: {}",
-            err
+            pg_error_text(&err)
         ),
     }
 }
@@ -303,7 +320,7 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
             "ERROR",
             "job {} setup (role/begin/search_path) failed, reason: {}",
             job.job,
-            err
+            pg_error_text(&err)
         );
         // A partial setup can leave the pooled connection in an aborted
         // transaction and/or with SET ROLE still active; clean it before the
@@ -325,7 +342,7 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
     let duration_secs = t0.elapsed().as_secs() as i64;
 
     if let Err(err) = exec_result {
-        err_text = err.to_string();
+        err_text = pg_error_text(&err);
         sqlstate = err.code().map(|c| c.code().to_string()).unwrap_or_default();
         status_text = "ERROR".to_string();
         dlog!(
@@ -340,7 +357,8 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
             dlog!(
                 config,
                 "ERROR",
-                "can not rollback a transaction, reason: {err}"
+                "can not rollback a transaction, reason: {}",
+                pg_error_text(&err)
             );
         } else {
             match kind {
@@ -359,7 +377,7 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
                             "ERROR",
                             "failed to record failure for scheduled job {}: {}",
                             job.job,
-                            err
+                            pg_error_text(&err)
                         );
                     }
                 }
@@ -392,11 +410,13 @@ fn execute_job(kind: JobKind, job: Job, pool: &Arc<JobPool>, config: &Config, st
                     dlog!(
                         config,
                         "ERROR",
-                        "can not commit a transaction, reason: {err}"
+                        "can not commit a transaction, reason: {}",
+                        pg_error_text(&err)
                     );
                 }
             }
             Err(err) => {
+                let err = pg_error_text(&err);
                 dlog!(
                     config,
                     "ERROR",
@@ -545,7 +565,7 @@ fn store_job_execution_details(
                 "ERROR",
                 "failed to store job execution details for job {}: {}",
                 details.jobid,
-                err
+                pg_error_text(&err)
             );
         }
     }

@@ -22,6 +22,21 @@ All notable changes to this project are documented in this file.
   warning on every build.
 - The README's installation notes now list the supported PostgreSQL versions,
   and give the real minimum for the extension (11, not 9.1).
+- **Building the scheduler now needs Rust 1.100 or later.** `rust-version` in
+  `rust/Cargo.toml` moves from 1.85 to 1.100, and the release workflow and the
+  Docker image (`rust:1.100-bookworm`) build with Rust 1.100.0 instead of
+  1.93.0. The duplicate `homepage` field is removed from `rust/Cargo.toml`;
+  Rust 1.100's cargo warns that it repeats `repository` on every build.
+
+### Security
+- Updated `ctutils` to 0.4.8, fixing non-constant-time mask generation and
+  `u128` comparisons (RUSTSEC-2026-0385). It reaches the scheduler through the
+  PostgreSQL driver's password-authentication hashing (`postgres-protocol` →
+  `hmac`/`md-5` → `digest`). The fixed release needs Rust 1.87, which the old
+  `rust-version` of 1.85 kept cargo from selecting.
+- Updated `tokio` to 1.54.1, fixing `AsyncFd::new` and related constructors
+  violating I/O safety (RUSTSEC-2026-0386). This also moves `mio` to 1.2.5,
+  `socket2` to 0.6.5 and `libc` to 0.2.191.
 
 ## 3.2.1 - 2026-09-10
 

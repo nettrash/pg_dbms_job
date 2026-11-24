@@ -2,3 +2,4 @@ data/
 .vscode/
 CLAUDE.md
 .DS_Store
+.claude/

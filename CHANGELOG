@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+- **PostgreSQL 19 support** (#29). The extension and the scheduler run on
+  PostgreSQL 19 as they are: no SQL or daemon change was needed. A new
+  `pg-compat` CI job now checks each supported major (15, 16, 17, 18 and 19)
+  on every push. It installs that PostgreSQL from apt.postgresql.org, builds
+  and installs with `make && sudo make install`, and runs
+  `ci/pg_compat_test.sh`, which upgrades from every shipped base version to the
+  current one, exercises the SQL API as a non-superuser role with the
+  documented grants, and has the installed scheduler run async, recurring,
+  one-shot and failing jobs as that role, checking the history it records and
+  that it stops cleanly. The script also runs locally against any server.
+
+### Changed
+- The Makefile's PostgreSQL version check uses `grep -E` instead of `egrep`,
+  which current GNU grep (Debian 13, Ubuntu 24.04) flags as obsolescent with a
+  warning on every build.
+- The README's installation notes now list the supported PostgreSQL versions,
+  and give the real minimum for the extension (11, not 9.1).
+- **Building the scheduler now needs Rust 1.100 or later.** `rust-version` in
+  `rust/Cargo.toml` moves from 1.85 to 1.100, and the release workflow and the
+  Docker image (`rust:1.100-bookworm`) build with Rust 1.100.0 instead of
+  1.93.0. The duplicate `homepage` field is removed from `rust/Cargo.toml`;
+  Rust 1.100's cargo warns that it repeats `repository` on every build.
+
+### Security
+- Updated `ctutils` to 0.4.8, fixing non-constant-time mask generation and
+  `u128` comparisons (RUSTSEC-2026-0385). It reaches the scheduler through the
+  PostgreSQL driver's password-authentication hashing (`postgres-protocol` →
+  `hmac`/`md-5` → `digest`). The fixed release needs Rust 1.87, which the old
+  `rust-version` of 1.85 kept cargo from selecting.
+- Updated `tokio` to 1.54.1, fixing `AsyncFd::new` and related constructors
+  violating I/O safety (RUSTSEC-2026-0386). This also moves `mio` to 1.2.5,
+  `socket2` to 0.6.5 and `libc` to 0.2.191.
+
 ## 3.2.1 - 2026-09-10
 
 Bug-fix release. Run `ALTER EXTENSION pg_dbms_job UPDATE TO '3.2.1';` and

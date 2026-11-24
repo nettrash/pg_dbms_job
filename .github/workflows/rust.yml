@@ -34,6 +34,62 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+  pg-compat:
+    name: PostgreSQL ${{ matrix.pg }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The community-supported PostgreSQL majors: add each new major when it
+        # is released, drop one when it reaches end of life
+        # (https://www.postgresql.org/support/versioning/).
+        pg: [15, 16, 17, 18, 19]
+    env:
+      PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      PGHOST: 127.0.0.1
+      PGPORT: "5499"
+      PGUSER: dbms
+      PGPASSWORD: dbms
+      PGDATABASE: postgres
+      COMPAT_TEST_PG_MAJOR: ${{ matrix.pg }}
+      # Test the scheduler binary `make install` put next to the server's.
+      COMPAT_TEST_BIN: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_dbms_job
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install PostgreSQL ${{ matrix.pg }} from apt.postgresql.org
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          # Only the cluster created below should run.
+          echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
+
+      - name: Start a PostgreSQL ${{ matrix.pg }} cluster
+        run: |
+          sudo pg_createcluster ${{ matrix.pg }} ci --port "$PGPORT" --start
+          # Superuser the test and the scheduler connect as, over TCP with a
+          # password (scram-sha-256 in the default pg_hba.conf). Run from /
+          # because the postgres user cannot enter the checkout.
+          cd / && sudo -u postgres psql -h /var/run/postgresql -p "$PGPORT" -U postgres -d postgres \
+            -qc "CREATE ROLE $PGUSER LOGIN SUPERUSER PASSWORD '$PGPASSWORD'"
+
+      - name: Build and install the extension and scheduler (PGXS)
+        run: |
+          make PG_CONFIG="$PG_CONFIG"
+          sudo make install PG_CONFIG="$PG_CONFIG"
+          # make install ships only the current base script; the upgrade checks
+          # also need the older ones, to create each version they start from.
+          sudo install -m 644 sql/pg_dbms_job--*.sql "$("$PG_CONFIG" --sharedir)/extension/"
+
+      - name: Compatibility test
+        run: bash ci/pg_compat_test.sh
+
   audit:
     name: Security audit (cargo-audit)
     runs-on: ubuntu-latest

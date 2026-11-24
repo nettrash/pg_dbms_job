@@ -2,7 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 3.2.2 - 2026-11-24
+
+PostgreSQL 19 support release. Run `ALTER EXTENSION pg_dbms_job UPDATE TO
+'3.2.2';` and restart the scheduler binary. The SQL schema is unchanged from
+3.2.1: the update script only advances the extension version.
 
 ### Added
 - **PostgreSQL 19 support** (#29). The extension and the scheduler run on

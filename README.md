@@ -59,10 +59,16 @@ The `NOTIFY` wake-up is a latency optimization on top of that poll — the poll 
 
 ## [Installation](#installation)
 
-The SQL extension only requires a PostgreSQL version that supports extensions
-(>= 9.1). The scheduler is a standalone daemon written in Rust (see
-[`rust/`](rust/) and [`rust/README.md`](rust/README.md)); build it with `cargo`
-or use the provided Docker image — it has no Perl or other runtime dependency.
+pg_dbms_job supports PostgreSQL 15, 16, 17, 18 and 19. CI checks every one of
+them on each push: it builds and installs with `make && sudo make install`,
+upgrades from every shipped version to the current one, runs the SQL API as an
+ordinary role and has the scheduler run real jobs
+([`ci/pg_compat_test.sh`](ci/pg_compat_test.sh)). The SQL extension itself
+needs PostgreSQL 11 or later, since it uses procedures and declarative
+partitioning, but releases older than 15 are no longer tested. The scheduler is
+a standalone daemon written in Rust (see [`rust/`](rust/) and
+[`rust/README.md`](rust/README.md)); build it with `cargo` or use the provided
+Docker image — it has no Perl or other runtime dependency.
 
 To install the SQL extension execute
 
